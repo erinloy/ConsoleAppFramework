@@ -406,6 +406,7 @@ internal static partial class ConsoleApp
         CancellationTokenSource cancellationTokenSource;
         CancellationTokenSource timeoutCancellationTokenSource;
         TimeSpan timeout;
+        volatile int disposed; // 0 = not disposed, 1 = disposed
 
         PosixSignalRegistration? sigInt;
         PosixSignalRegistration? sigQuit;
@@ -433,6 +434,12 @@ internal static partial class ConsoleApp
 
         void HandlePosixSignal(PosixSignalContext context)
         {
+            // Check if already disposed to prevent race condition
+            if (System.Threading.Interlocked.CompareExchange(ref disposed, 0, 0) != 0)
+            {
+                return;
+            }
+
             context.Cancel = true;
             cancellationTokenSource.Cancel();
             timeoutCancellationTokenSource.CancelAfter(timeout);
@@ -440,9 +447,18 @@ internal static partial class ConsoleApp
 
         public void Dispose()
         {
+            // Mark as disposed FIRST to prevent HandlePosixSignal from accessing disposed resources
+            if (System.Threading.Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return; // Already disposed
+            }
+
+            // Dispose signal registrations to stop new signals
             sigInt?.Dispose();
             sigQuit?.Dispose();
             sigTerm?.Dispose();
+
+            // Now safe to dispose the CancellationTokenSource
             cancellationTokenSource.Dispose();
             timeoutCancellationTokenSource.Dispose();
         }
