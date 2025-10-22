@@ -650,7 +650,7 @@ internal static partial class ConsoleApp
             {
                 if (startHost && host != null)
                 {
-                    host.StartAsync().GetAwaiter().GetResult();
+                    host.StartAsync(cancellationToken).GetAwaiter().GetResult();
                 }
                 RunCore(args, cancellationToken);
             }
@@ -658,7 +658,7 @@ internal static partial class ConsoleApp
             {
                 if (stopHost && host != null)
                 {
-                    host.StopAsync().GetAwaiter().GetResult();
+                    host.StopAsync(cancellationToken).GetAwaiter().GetResult();
                 }
                 if (disposeServiceProvider)
                 {
@@ -681,7 +681,7 @@ internal static partial class ConsoleApp
             {
                 if (startHost && host != null)
                 {
-                    await host.StartAsync();
+                    await host.StartAsync(cancellationToken);
                 }
                 Task? task = null;
                 RunAsyncCore(args, cancellationToken, ref task!);
@@ -694,7 +694,7 @@ internal static partial class ConsoleApp
             {
                 if (stopHost && host != null)
                 {
-                    await host.StopAsync();
+                    await host.StopAsync(cancellationToken);
                 }
                 if (disposeServiceProvider)
                 {
