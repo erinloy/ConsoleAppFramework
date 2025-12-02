@@ -10,7 +10,7 @@ using BenchmarkDotNet.Running;
 using BenchmarkDotNet.Toolchains.CsProj;
 using Perfolizer.Horology;
 
-namespace Cocona.Benchmark.External;
+namespace CliFrameworkBenchmarks;
 
 class Program
 {
@@ -18,10 +18,12 @@ class Program
     {
         var config = DefaultConfig.Instance
                                   .WithSummaryStyle(SummaryStyle.Default
-                                  .WithTimeUnit(TimeUnit.Millisecond));
+                                  .WithTimeUnit(TimeUnit.Millisecond))
+                                  .HideColumns(BenchmarkDotNet.Columns.Column.Error)
+                                  ;
 
         config.AddDiagnoser(MemoryDiagnoser.Default);
-        config.AddDiagnoser(new ThreadingDiagnoser(new ThreadingDiagnoserConfig(displayLockContentionWhenZero: false, displayCompletedWorkItemCountWhenZero: false)));
+        // config.AddDiagnoser(new ThreadingDiagnoser(new ThreadingDiagnoserConfig(displayLockContentionWhenZero: false, displayCompletedWorkItemCountWhenZero: false)));
 
         config.AddJob(Job.Default
                          .WithStrategy(RunStrategy.ColdStart)
@@ -29,7 +31,7 @@ class Program
                          .WithWarmupCount(0)
                          .WithIterationCount(1)
                          .WithInvocationCount(1)
-                         .WithToolchain(CsProjCoreToolchain.NetCoreApp80)
+                         .WithToolchain(CsProjCoreToolchain.NetCoreApp10_0) // .NET 10
                          .DontEnforcePowerPlan());
 
         BenchmarkRunner.Run<Benchmark>(config, args);

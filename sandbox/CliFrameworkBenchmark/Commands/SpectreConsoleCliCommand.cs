@@ -1,7 +1,6 @@
 ﻿using Spectre.Console.Cli;
-using System.ComponentModel;
 
-namespace Cocona.Benchmark.External.Commands;
+namespace CliFrameworkBenchmarks.Commands;
 
 public class SpectreConsoleCliCommand : Command<SpectreConsoleCliCommand.Settings>
 {
@@ -17,7 +16,7 @@ public class SpectreConsoleCliCommand : Command<SpectreConsoleCliCommand.Setting
         public bool boolOption { get; init; }
     }
 
-    public override int Execute(CommandContext context, Settings settings)
+    public override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         return 0;
     }

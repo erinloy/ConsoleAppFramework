@@ -45,14 +45,49 @@ internal interface IArgumentParser<T>
     static abstract bool TryParse(ReadOnlySpan<char> s, out T result);
 }
 
+/// <summary>
+/// Represents the execution context for a console application command, containing command metadata and parsed arguments.
+/// </summary>
 internal record ConsoleAppContext
 {
+    /// <summary>
+    /// Gets the name of the command being executed.
+    /// </summary>
     public string CommandName { get; init; }
-    public string[] Arguments { get; init; }
-    public object? State { get; init; }
-    internal int CommandDepth { get; }
-    internal int EscapeIndex  { get; }
 
+    /// <summary>
+    /// Gets the raw arguments passed to the application, including the command name itself.
+    /// </summary>
+    public string[] Arguments { get; init; }
+
+    /// <summary>
+    /// Gets the custom state object that can be used to share data across commands.
+    /// </summary>
+    public object? State { get; init; }
+
+    /// <summary>
+    /// Gets the parsed global options that apply across all commands.
+    /// </summary>
+    public object? GlobalOptions { get; init; }
+
+    /// <summary>
+    /// Gets the depth of the command in a nested command hierarchy. Used internally by the framework.
+    /// </summary>
+    public int CommandDepth { get; }
+
+    /// <summary>
+    /// Gets the index of the escape separator ('--') in the arguments, or -1 if not present. Used internally by the framework.
+    /// </summary>
+    public int EscapeIndex { get; }
+
+    /// <summary>
+    /// Gets the internal command arguments with global options removed. Used internally by the framework.
+    /// </summary>
+    public ReadOnlyMemory<string> InternalCommandArgs { get; }
+
+    /// <summary>
+    /// Gets the arguments intended for the current command, excluding the command name and any escaped arguments after '--'.
+    /// </summary>
     public ReadOnlySpan<string> CommandArguments
     {
         get => (EscapeIndex == -1)
@@ -60,6 +95,10 @@ internal record ConsoleAppContext
             : Arguments.AsSpan(CommandDepth, EscapeIndex - CommandDepth);
     }
 
+    /// <summary>
+    /// Gets the arguments that appear after the escape separator ('--'), which are not parsed by the command.
+    /// Returns an empty span if no escape separator is present.
+    /// </summary>
     public ReadOnlySpan<string> EscapedArguments
     {
         get => (EscapeIndex == -1)
@@ -67,15 +106,21 @@ internal record ConsoleAppContext
             : Arguments.AsSpan(EscapeIndex + 1);
     }
 
-    public ConsoleAppContext(string commandName, string[] arguments, object? state, int commandDepth, int escapeIndex)
+    public ConsoleAppContext(string commandName, string[] arguments, ReadOnlyMemory<string> internalCommandArgs, object? state, object? globalOptions, int commandDepth, int escapeIndex)
     {
         this.CommandName = commandName;
         this.Arguments = arguments;
+        this.InternalCommandArgs = internalCommandArgs;
         this.State = state;
+        this.GlobalOptions = globalOptions;
         this.CommandDepth = commandDepth;
         this.EscapeIndex = escapeIndex;
     }
 
+    /// <summary>
+    /// Returns a string representation of all arguments joined by spaces.
+    /// </summary>
+    /// <returns>A space-separated string of all arguments.</returns>
     public override string ToString()
     {
         return string.Join(" ", Arguments);
@@ -143,11 +188,23 @@ internal sealed class RegisterCommandsAttribute : Attribute
     }
 }
 
+[AttributeUsage(AttributeTargets.Parameter, AllowMultiple = false, Inherited = false)]
+internal sealed class HideDefaultValueAttribute : Attribute
+{
+}
+
 [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = false, Inherited = false)]
-public class ConsoleAppFrameworkGeneratorOptionsAttribute : Attribute
+internal class ConsoleAppFrameworkGeneratorOptionsAttribute : Attribute
 {
     public bool DisableNamingConversion { get; set; }
 }
+
+internal interface IFilterFactory
+{
+    public ConsoleAppFilter BuildFilter();
+}
+
+internal delegate object FuncGlobalOptionsBuilderObject(ref ConsoleApp.GlobalOptionsBuilder builder);
 
 [UnconditionalSuppressMessage("Trimming", "IL2026")]
 [UnconditionalSuppressMessage("AOT", "IL3050")]
@@ -178,7 +235,7 @@ internal static partial class ConsoleApp
     /// ConsoleApp.Run(args, Foo);<br/>
     /// ConsoleApp.Run(args, &amp;Foo);<br/>
     /// </summary>
-    public static void Run(string[] args)
+    public static void Run(string[] args, Delegate command)
     {
     }
 
@@ -188,7 +245,7 @@ internal static partial class ConsoleApp
     /// ConsoleApp.RunAsync(args, Foo);<br/>
     /// ConsoleApp.RunAsync(args, &amp;Foo);<br/>
     /// </summary>
-    public static Task RunAsync(string[] args)
+    public static Task RunAsync(string[] args, Delegate command)
     {
         return Task.CompletedTask;
     }
@@ -198,6 +255,12 @@ internal static partial class ConsoleApp
     static void ThrowArgumentParseFailed(string argumentName, string value)
     {
         throw new ArgumentParseFailedException($"Argument '{argumentName}' failed to parse, provided value: {value}");
+    }
+
+    static void ThrowArgumentParseFailedEnum(Type enumType, string argumentName, string value)
+    {
+        var values = string.Join(", ", Enum.GetNames(enumType));
+        throw new ArgumentParseFailedException($"Argument '{argumentName}' is invalid. Provided value: {value}. Valid values: {values}");
     }
 
     static void ThrowRequiredArgumentNotParsed(string name)
@@ -371,33 +434,6 @@ internal static partial class ConsoleApp
 
     static partial void ShowHelp(int helpId);
 
-    static async Task RunWithFilterAsync(string commandName, string[] args, int commandDepth, int escapeIndex, ConsoleAppFilter invoker, CancellationToken cancellationToken)
-    {
-        using var posixSignalHandler = PosixSignalHandler.Register(Timeout, cancellationToken);
-        try
-        {
-            await Task.Run(() => invoker.InvokeAsync(new ConsoleAppContext(commandName, args, null, commandDepth, escapeIndex), posixSignalHandler.Token)).WaitAsync(posixSignalHandler.TimeoutToken);
-        }
-        catch (Exception ex)
-        {
-            if (ex is OperationCanceledException)
-            {
-                Environment.ExitCode = 130;
-                return;
-            }
-
-            Environment.ExitCode = 1;
-            if (ex is ValidationException or ArgumentParseFailedException)
-            {
-                LogError(ex.Message);
-            }
-            else
-            {
-                LogError(ex.ToString());
-            }
-        }
-    }
-
     sealed class PosixSignalHandler : IDisposable
     {
         public CancellationToken Token => cancellationTokenSource.Token;
@@ -477,6 +513,9 @@ internal static partial class ConsoleApp
 
     internal partial class ConsoleAppBuilder
     {
+        FuncGlobalOptionsBuilderObject? configureGlobalOptions;
+        bool isRequireCallBuildAndSetServiceProvider = false;
+
         public ConsoleAppBuilder()
         {
         }
@@ -504,7 +543,9 @@ internal static partial class ConsoleApp
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         partial void RunAsyncCore(string[] args, CancellationToken cancellationToken, ref Task result);
 
-        partial void BuildAndSetServiceProvider();
+        partial void BuildAndSetServiceProvider(ConsoleAppContext context);
+
+        partial void StartHostAsyncIfNeeded(CancellationToken cancellationToken, ref Task task);
 
         static partial void ShowHelp(int helpId);
 
@@ -537,6 +578,515 @@ internal static partial class ConsoleApp
 
             return false;
         }
+
+        public ConsoleAppBuilder ConfigureGlobalOptions(FuncGlobalOptionsBuilderObject configure)
+        {
+            this.configureGlobalOptions = configure;
+            this.isRequireCallBuildAndSetServiceProvider = true;
+            return this;
+        }
+
+        async Task RunWithFilterAsync(string commandName, string[] args, int commandDepth, IFilterFactory filterFactory, CancellationToken cancellationToken)
+        {
+            using var posixSignalHandler = PosixSignalHandler.Register(Timeout, cancellationToken);
+            try
+            {
+                var escapeIndex = args.AsSpan().IndexOf("--");
+                var commandArgs = (escapeIndex == -1) ? args.AsMemory(commandDepth) : args.AsMemory(commandDepth, escapeIndex - commandDepth);
+
+                ConsoleAppContext context;
+                if (configureGlobalOptions == null)
+                {
+                    context = new ConsoleAppContext(commandName, args, commandArgs, null, null, commandDepth, escapeIndex);
+                }
+                else
+                {
+                    var builder = new GlobalOptionsBuilder(commandArgs);
+                    var globalOptions = configureGlobalOptions(ref builder);
+                    context = new ConsoleAppContext(commandName, args, builder.RemainingArgs, null, globalOptions, commandDepth, escapeIndex);
+                }
+                BuildAndSetServiceProvider(context);
+
+                Task? startHostTask = null;
+                StartHostAsyncIfNeeded(posixSignalHandler.Token, ref startHostTask);
+                if (startHostTask != null)
+                {
+                    await startHostTask;
+                }
+
+                var invoker = filterFactory.BuildFilter();
+                await Task.Run(() => invoker.InvokeAsync(context, posixSignalHandler.Token)).WaitAsync(posixSignalHandler.TimeoutToken);
+            }
+            catch (Exception ex)
+            {
+                if (ex is OperationCanceledException)
+                {
+                    Environment.ExitCode = 130;
+                    return;
+                }
+
+                Environment.ExitCode = 1;
+                if (ex is ValidationException or ArgumentParseFailedException)
+                {
+                    LogError(ex.Message);
+                }
+                else
+                {
+                    LogError(ex.ToString());
+                }
+            }
+        }
+    }
+
+    internal ref struct GlobalOptionsBuilder
+    {
+        ReadOnlyMemory<string> args;
+
+        public ReadOnlyMemory<string> RemainingArgs => args;
+
+        public GlobalOptionsBuilder(ReadOnlyMemory<string> args)
+        {
+            this.args = args;
+        }
+
+        public T AddGlobalOption<T>([ConstantExpected] string name, [ConstantExpected] string description = "", [ConstantExpected] T defaultValue = default(T))
+        {
+            var aliasCount = name.AsSpan().Count("|") + 1;
+            if (aliasCount == 1)
+            {
+                var span = args.Span;
+                for (int i = 0; i < span.Length; i++)
+                {
+                    if (span[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return ParseArgument<T>(ref args, i);
+                    }
+                }
+            }
+            else
+            {
+                Span<Range> aliases = stackalloc Range[aliasCount];
+                if (name.AsSpan().Split(aliases, '|') == 2)
+                {
+                    var name1 = name.AsSpan()[aliases[0]].Trim();
+                    var name2 = name.AsSpan()[aliases[1]].Trim();
+
+                    var span = args.Span;
+                    for (int i = 0; i < span.Length; i++)
+                    {
+                        if (span[i].AsSpan().Equals(name1, StringComparison.OrdinalIgnoreCase) || span[i].AsSpan().Equals(name2, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return ParseArgument<T>(ref args, i);
+                        }
+                    }
+                }
+                else
+                {
+                    var span = args.Span;
+                    for (int i = 0; i < span.Length; i++)
+                    {
+                        if (Contains(name, aliases, span[i]))
+                        {
+                            return ParseArgument<T>(ref args, i);
+                        }
+                    }
+                }
+            }
+
+            return defaultValue;
+        }
+
+        public T AddRequiredGlobalOption<T>([ConstantExpected] string name, [ConstantExpected] string description = "")
+        {
+            if (typeof(T) == typeof(bool)) throw new InvalidOperationException("<bool> can not use in AddRequiredGlobalOption. use AddGlobalOption instead.");
+
+            var aliasCount = name.AsSpan().Count("|") + 1;
+            if (aliasCount == 1)
+            {
+                var span = args.Span;
+                for (int i = 0; i < span.Length; i++)
+                {
+                    if (span[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return ParseArgument<T>(ref args, i);
+                    }
+                }
+            }
+            else
+            {
+                Span<Range> aliases = stackalloc Range[aliasCount];
+                if (name.AsSpan().Split(aliases, '|') == 2)
+                {
+                    var name1 = name.AsSpan()[aliases[0]].Trim();
+                    var name2 = name.AsSpan()[aliases[1]].Trim();
+
+                    var span = args.Span;
+                    for (int i = 0; i < span.Length; i++)
+                    {
+                        if (span[i].AsSpan().Equals(name1, StringComparison.OrdinalIgnoreCase) || span[i].AsSpan().Equals(name2, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return ParseArgument<T>(ref args, i);
+                        }
+                    }
+                }
+                else
+                {
+                    var span = args.Span;
+                    for (int i = 0; i < span.Length; i++)
+                    {
+                        if (Contains(name, aliases, span[i]))
+                        {
+                            return ParseArgument<T>(ref args, i);
+                        }
+                    }
+                }
+            }
+
+            ThrowRequiredArgumentNotParsed(name);
+            return default;
+        }
+
+        static T ParseArgument<T>(ref ReadOnlyMemory<string> args, int i)
+        {
+            if (typeof(T) == typeof(bool))
+            {
+                RemoveRange(ref args, i, 1);
+                var t = true;
+                return Unsafe.As<bool, T>(ref t);
+            }
+            else
+            {
+                if ((i + 1) < args.Length)
+                {
+                    if (TryParse<T>(args.Span[i + 1], out var value))
+                    {
+                        RemoveRange(ref args, i, 2);
+                        return value;
+                    }
+
+                    if (typeof(T).IsEnum)
+                    {
+                        ThrowArgumentParseFailedEnum(typeof(T), args.Span[i], args.Span[i + 1]);
+                    }
+
+                    ThrowArgumentParseFailed(args.Span[i], args.Span[i + 1]);
+                }
+                else
+                {
+                    ThrowArgumentParseFailed(args.Span[i], "");
+                }
+            }
+
+            return default;
+        }
+
+        static void RemoveRange(ref ReadOnlyMemory<string> args, int index, int length)
+        {
+            if (length <= 0) return;
+
+            // Fast path(removing from start/end) no need copy
+            if (index == 0)
+            {
+                args = args.Slice(length);
+                return;
+            }
+            else if (index + length == args.Length)
+            {
+                args = args.Slice(0, index);
+                return;
+            }
+
+            // Otherwise, need to copy
+            var temp = new string[args.Length - length];
+            args.Span.Slice(0, index).CopyTo(temp);
+            args.Span.Slice(index + length).CopyTo(temp.AsSpan(index));
+            args = temp;
+        }
+
+        static bool Contains(ReadOnlySpan<char> nameToSlice, Span<Range> ranges, string target)
+        {
+            for (int i = 0; i < ranges.Length; i++)
+            {
+                var name = nameToSlice[ranges[i]].Trim();
+                if (name.Equals(target, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static bool TryParse<T>(string s, out T result)
+        {
+            if (typeof(T) == typeof(string))
+            {
+                result = Unsafe.As<string, T>(ref s);
+                return true;
+            }
+            else if (typeof(T) == typeof(char))
+            {
+                if (char.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<char, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(sbyte))
+            {
+                if (sbyte.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<sbyte, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(byte))
+            {
+                if (byte.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<byte, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(short))
+            {
+                if (short.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<short, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(int))
+            {
+                if (int.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<int, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(long))
+            {
+                if (long.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<long, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(ushort))
+            {
+                if (ushort.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<ushort, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(uint))
+            {
+                if (uint.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<uint, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(ulong))
+            {
+                if (ulong.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<ulong, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(float))
+            {
+                if (float.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<float, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(double))
+            {
+                if (double.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<double, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else if (typeof(T) == typeof(decimal))
+            {
+                if (decimal.TryParse(s, out var v))
+                {
+                    result = Unsafe.As<decimal, T>(ref v);
+                    return true;
+                }
+                result = default;
+                return false;
+            }
+            else
+            {
+                if (typeof(T).IsEnum)
+                {
+                    if (Enum.TryParse(typeof(T), s, ignoreCase: true, out var v))
+                    {
+                        result = (T)v;
+                        return true;
+                    }
+                }
+
+                var underlyingType = Nullable.GetUnderlyingType(typeof(T));
+                if (underlyingType != null)
+                {
+                    return TryParseNullable<T>(underlyingType, s, out result);
+                }
+
+                result = default;
+                return false;
+            }
+        }
+
+        static bool TryParseNullable<T>(Type underlyingType, string s, out T result)
+        {
+            if (underlyingType == typeof(char))
+            {
+                if (char.TryParse(s, out var v))
+                {
+                    var nullableValue = new char?(v);
+                    result = Unsafe.As<char?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(sbyte))
+            {
+                if (sbyte.TryParse(s, out var v))
+                {
+                    var nullableValue = new sbyte?(v);
+                    result = Unsafe.As<sbyte?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(byte))
+            {
+                if (byte.TryParse(s, out var v))
+                {
+                    var nullableValue = new byte?(v);
+                    result = Unsafe.As<byte?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(short))
+            {
+                if (short.TryParse(s, out var v))
+                {
+                    var nullableValue = new short?(v);
+                    result = Unsafe.As<short?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(int))
+            {
+                if (int.TryParse(s, out var v))
+                {
+                    var nullableValue = new int?(v);
+                    result = Unsafe.As<int?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(long))
+            {
+                if (long.TryParse(s, out var v))
+                {
+                    var nullableValue = new long?(v);
+                    result = Unsafe.As<long?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(ushort))
+            {
+                if (ushort.TryParse(s, out var v))
+                {
+                    var nullableValue = new ushort?(v);
+                    result = Unsafe.As<ushort?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(uint))
+            {
+                if (uint.TryParse(s, out var v))
+                {
+                    var nullableValue = new uint?(v);
+                    result = Unsafe.As<uint?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(ulong))
+            {
+                if (ulong.TryParse(s, out var v))
+                {
+                    var nullableValue = new ulong?(v);
+                    result = Unsafe.As<ulong?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(float))
+            {
+                if (float.TryParse(s, out var v))
+                {
+                    var nullableValue = new float?(v);
+                    result = Unsafe.As<float?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(double))
+            {
+                if (double.TryParse(s, out var v))
+                {
+                    var nullableValue = new double?(v);
+                    result = Unsafe.As<double?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType == typeof(decimal))
+            {
+                if (decimal.TryParse(s, out var v))
+                {
+                    var nullableValue = new decimal?(v);
+                    result = Unsafe.As<decimal?, T>(ref nullableValue);
+                    return true;
+                }
+            }
+            else if (underlyingType.IsEnum)
+            {
+                if (Enum.TryParse(underlyingType, s, ignoreCase: true, out var v))
+                {
+                    result = (T)v;
+                    return true;
+                }
+            }
+
+            result = default;
+            return false;
+        }
     }
 }
 """;
@@ -567,7 +1117,6 @@ internal static partial class ConsoleApp
 
         public void Run(string[] args, bool disposeServiceProvider, CancellationToken cancellationToken = default)
         {
-            BuildAndSetServiceProvider();
             try
             {
                 RunCore(args, cancellationToken);
@@ -589,7 +1138,6 @@ internal static partial class ConsoleApp
 
         public async Task RunAsync(string[] args, bool disposeServiceProvider, CancellationToken cancellationToken = default)
         {
-            BuildAndSetServiceProvider();
             try
             {
                 Task? task = null;
@@ -639,19 +1187,17 @@ internal static partial class ConsoleApp
 {
     internal partial class ConsoleAppBuilder
     {
+        Microsoft.Extensions.Hosting.IHost? host;
+        bool startHost;
+
         public void Run(string[] args) => Run(args, true, true, true);
         public void Run(string[] args, CancellationToken cancellationToken) => Run(args, true, true, true, cancellationToken);
         
         public void Run(string[] args, bool startHost, bool stopHost, bool disposeServiceProvider, CancellationToken cancellationToken = default)
         {
-            BuildAndSetServiceProvider();
-            Microsoft.Extensions.Hosting.IHost? host = ConsoleApp.ServiceProvider?.GetService(typeof(Microsoft.Extensions.Hosting.IHost)) as Microsoft.Extensions.Hosting.IHost;
+            this.startHost = startHost;
             try
             {
-                if (startHost && host != null)
-                {
-                    host.StartAsync(cancellationToken).GetAwaiter().GetResult();
-                }
                 RunCore(args, cancellationToken);
             }
             finally
@@ -659,6 +1205,7 @@ internal static partial class ConsoleApp
                 if (stopHost && host != null)
                 {
                     host.StopAsync(cancellationToken).GetAwaiter().GetResult();
+                    host = null;
                 }
                 if (disposeServiceProvider)
                 {
@@ -675,14 +1222,9 @@ internal static partial class ConsoleApp
 
         public async Task RunAsync(string[] args, bool startHost, bool stopHost, bool disposeServiceProvider, CancellationToken cancellationToken = default)
         {
-            BuildAndSetServiceProvider();
-            Microsoft.Extensions.Hosting.IHost? host = ConsoleApp.ServiceProvider?.GetService(typeof(Microsoft.Extensions.Hosting.IHost)) as Microsoft.Extensions.Hosting.IHost;
+            this.startHost = startHost;
             try
             {
-                if (startHost && host != null)
-                {
-                    await host.StartAsync(cancellationToken);
-                }
                 Task? task = null;
                 RunAsyncCore(args, cancellationToken, ref task!);
                 if (task != null)
@@ -695,6 +1237,7 @@ internal static partial class ConsoleApp
                 if (stopHost && host != null)
                 {
                     await host.StopAsync(cancellationToken);
+                    host = null;
                 }
                 if (disposeServiceProvider)
                 {

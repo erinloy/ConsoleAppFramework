@@ -1,11 +1,14 @@
 ﻿ConsoleAppFramework
 ===
 [![GitHub Actions](https://github.com/Cysharp/ConsoleAppFramework/workflows/Build-Debug/badge.svg)](https://github.com/Cysharp/ConsoleAppFramework/actions) [![Releases](https://img.shields.io/github/release/Cysharp/ConsoleAppFramework.svg)](https://github.com/Cysharp/ConsoleAppFramework/releases)
+[![Version](https://img.shields.io/nuget/v/ConsoleAppFramework.svg?color=royalblue)](https://www.nuget.org/packages/ConsoleAppFramework)
+[![Downloads](https://img.shields.io/nuget/dt/ConsoleAppFramework.svg?color=darkmagenta)](https://www.nuget.org/packages/ConsoleAppFramework)
 
 ConsoleAppFramework v5 is Zero Dependency, Zero Overhead, Zero Reflection, Zero Allocation, AOT Safe CLI Framework powered by C# Source Generator; achieves exceptionally high performance, fastest start-up time(with NativeAOT) and minimal binary size. Leveraging the latest features of .NET 8 and C# 13 ([IncrementalGenerator](https://github.com/dotnet/roslyn/blob/main/docs/features/incremental-generators.md), [managed function pointer](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/proposals/csharp-9.0/function-pointers#function-pointers-1), [params arrays and default values lambda expression](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/operators/lambda-expressions#input-parameters-of-a-lambda-expression), [`ISpanParsable<T>`](https://learn.microsoft.com/en-us/dotnet/api/system.ispanparsable-1), [`PosixSignalRegistration`](https://learn.microsoft.com/en-us/dotnet/api/system.runtime.interopservices.posixsignalregistration), etc.), this library ensures maximum performance while maintaining flexibility and extensibility.
 
-![image](https://github.com/Cysharp/ConsoleAppFramework/assets/46207/db4bf599-9fe0-4ce4-801f-0003f44d5628)
-> Set `RunStrategy=ColdStart WarmupCount=0` to calculate the cold start benchmark, which is suitable for CLI application.
+![image](https://github.com/user-attachments/assets/94eb7110-e35e-4ee4-a73f-566309041c27)
+
+> .NET 10.0 and Set `RunStrategy=ColdStart WarmupCount=0` to calculate the cold start benchmark, which is suitable for CLI application.
 
 The magical performance is achieved by statically generating everything and parsing inline. Let's take a look at a minimal example:
 
@@ -118,8 +121,8 @@ internal static partial class ConsoleApp
 Usage: [options...] [-h|--help] [--version]
 
 Options:
-  --foo <int>     (Required)
-  --bar <int>     (Required)
+  --foo <int>     [Required]
+  --bar <int>     [Required]
 """);
     }
 }
@@ -155,9 +158,11 @@ As you can see from the generated output, the help display is also fast. In typi
 
 Getting Started
 --
-This library is distributed via NuGet, minimal requirement is .NET 8 and C# 13.
+This library is distributed via [NuGet](https://www.nuget.org/packages/ConsoleAppFramework), minimal requirement is .NET 8 and C# 13.
 
-> dotnet add package [ConsoleAppFramework](https://www.nuget.org/packages/ConsoleAppFramework)
+```bash
+dotnet add package ConsoleAppFramework
+```
 
 ConsoleAppFramework is an analyzer (Source Generator) and does not have any dll references. When referenced, the entry point class `ConsoleAppFramework.ConsoleApp` is generated internally.
 
@@ -236,7 +241,7 @@ ConsoleApp.Run(args, (string message) => Console.Write($"Hello, {message}"));
 Usage: [options...] [-h|--help] [--version]
 
 Options:
-  --message <string>     (Required)
+  --message <string>     [Required]
 ```
 
 In ConsoleAppFramework, instead of using attributes, you can provide descriptions and aliases for functions by writing Document Comments. This avoids the common issue in frameworks where arguments become cluttered with attributes, making the code difficult to read. With this approach, a natural writing style is achieved.
@@ -260,7 +265,7 @@ Usage: [options...] [-h|--help] [--version]
 Display Hello.
 
 Options:
-  -m|--message <string>    Message to show. (Required)
+  -m, --message <string>    Message to show. [Required]
 ```
 
 To add aliases to parameters, list the aliases separated by `|` before the comma in the comment. For example, if you write a comment like `-a|-b|--abcde, Description.`, then `-a`, `-b`, and `--abcde` will be treated as aliases, and `Description.` will be the description.
@@ -268,6 +273,27 @@ To add aliases to parameters, list the aliases separated by `|` before the comma
 Unfortunately, due to current C# specifications, lambda expressions and [local functions do not support document comments](https://github.com/dotnet/csharplang/issues/2110), so a class is required.
 
 In addition to `-h|--help`, there is another special built-in option: `--version`. In default, it displays the `AssemblyInformationalVersion` without source revision or `AssemblyVersion`. You can configure version string by `ConsoleApp.Version`, for example `ConsoleApp.Version = "2001.9.3f14-preview2";`.
+
+When a default value exists, that value is displayed by default. If you want to omit this display, add the `[HideDefaultValue]` attribute.
+
+```csharp
+ConsoleApp.Run(args, (Fruit myFruit = Fruit.Apple, [HideDefaultValue] Fruit myFruit2 = Fruit.Grape) => { });
+
+enum Fruit
+{
+    Orange, Grape, Apple
+}
+```
+
+```txt
+Usage: [options...] [-h|--help] [--version]
+
+Options:
+  --my-fruit <Fruit>      [Default: Apple]
+  --my-fruit2 <Fruit>
+```
+
+Additionally, if you add the `[Hidden]` attribute, the help for that parameter itself will be hidden.
 
 Command
 ---
@@ -321,7 +347,7 @@ Usage: [command] [options...] [-h|--help] [--version]
 Root command test.
 
 Options:
-  -m|--msg <string>    Message to show. (Required)
+  -m, --msg <string>    Message to show. [Required]
 
 Commands:
   echo    Display message.
@@ -401,6 +427,46 @@ app.Run(args);
 ```
 
 You can also combine this with `Add` or `Add<T>` to add more commands.
+
+### Alias command 
+
+Similar to option aliases, commands also support aliases. In the `Add` method, separating `commandName` or `[Command]` with `|` defines them as aliases.
+
+```csharp
+using ConsoleAppFramework;
+
+var app = ConsoleApp.Create();
+
+app.Add("build|b", () => { });
+app.Add("keyvault|kv", () => { });
+app.Add<Commands>();
+
+app.Run(args);
+
+public class Commands
+{
+    /// <summary>Executes the check command using the specified coordinates.</summary>
+    [Command("check|c")]
+    public void Check() { }
+
+    /// <summary>Build this packages's and its dependencies' documenation.</summary>
+    [Command("doc|d")]
+    public void Doc() { }
+}
+```
+
+It also supports aliases for nested commands.
+
+```csharp
+var app = ConsoleApp.Create();
+
+app.Add("dotnet package add|dotnet add package", () => { });
+app.Add("dotnet package list|dotnet list package", () => { });
+app.Add("dotnet package remove|dotnet remove package", () => { });
+app.Add("dotnet reference add|dotnet add reference", () => { });
+
+app.Run(args);
+```
 
 ### Performance of Commands
 
@@ -550,7 +616,15 @@ When using `ConsoleApp.Run`, you can check the syntax of the command line in the
 
 For the rules on converting parameter names to option names, aliases, and how to set documentation, refer to the [Option aliases](#option-aliases-and-help-version) section.
 
-Parameters marked with the `[Argument]` attribute receive values in order without parameter names. This attribute can only be set on sequential parameters from the beginning.
+Parameters marked with the `[Argument]` attribute receive values in order without parameter names. This attribute allows from first or last.
+
+```csharp
+// cmd.exe "input.txt" "output.txt"
+ConsoleApp.Run(args, ([Argument]string input, [Argument]string output, bool dryRun) => { });
+
+// cmd.exe --message "foo bar baz" "output1.txt" "output2.txt" "output3.txt"
+ConsoleApp.Run(args, (string message, [Argument]params string[] outputs) => { });
+```
 
 To convert from string arguments to various types, basic primitive types (`string`, `char`, `sbyte`, `byte`, `short`, `int`, `long`, `uint`, `ushort`, `ulong`, `decimal`, `float`, `double`) use `TryParse`. For types that implement `ISpanParsable<T>` (`DateTime`, `DateTimeOffset`, `Guid`, `BigInteger`, `Complex`, `Half`, `Int128`, etc.), [IParsable<TSelf>.TryParse](https://learn.microsoft.com/en-us/dotnet/api/system.iparsable-1.tryparse?view=net-8.0#system-ispanparsable-1-tryparse(system-readonlyspan((system-char))-system-iformatprovider-0@)) or [ISpanParsable<TSelf>.TryParse](https://learn.microsoft.com/en-us/dotnet/api/system.ispanparsable-1.tryparse?view=net-8.0#system-ispanparsable-1-tryparse(system-readonlyspan((system-char))-system-iformatprovider-0@)) is used.
 
@@ -573,6 +647,93 @@ If none of the above cases apply, `JsonSerializer.Deserialize<T>` is used to per
 If you want to change the deserialization options, you can set `JsonSerializerOptions` to `ConsoleApp.JsonSerializerOptions`.
 
 > NOTE: If they are not set when NativeAOT is used, a runtime exception may occur. If they are included in the parsing process, be sure to set source generated options.
+
+### GlobalOptions
+
+By calling `ConfigureGlobalOptions` on `ConsoleAppBuilder`, you can define global options that are enabled for all commands. For example, `--dry-run` or `--verbose` are suitable as common options.
+
+```csharp
+var app = ConsoleApp.Create();
+// builder: Func<ref ConsoleApp.GlobalOptionsBuilder, object>
+app.ConfigureGlobalOptions((ref builder) =>
+{
+    var dryRun = builder.AddGlobalOption<bool>("--dry-run");
+    var verbose = builder.AddGlobalOption<bool>("-v|--verbose");
+    var intParameter = builder.AddRequiredGlobalOption<int>("--int-parameter", "integer parameter");
+    // return value stored to ConsoleAppContext.GlobalOptions
+    return new GlobalOptions(dryRun, verbose, intParameter);
+});
+app.Add("", (int x, int y, ConsoleAppContext context) =>
+{
+    var globalOptions = (GlobalOptions)context.GlobalOptions;
+    Console.WriteLine(globalOptions + ":" + (x, y));
+});
+app.Run(args);
+internal record GlobalOptions(bool DryRun, bool Verbose, int IntParameter);
+```
+
+> NOTE: `(ref builder)` can be written in C# 14 and later. For earlier versions, you need to write `(ref ConsoleApp.GlobalOptionsBuilder builder)`.
+
+With `AddGlobalOption<T>`, you can define optional global options, and with `AddRequiredGlobalOption<T>`, you can define required global options. Each of these is also reflected in the command's help.
+
+To define name aliases, separate them with `|` like `-v|--verbose`.
+
+Unlike command parameters, the supported types are limited to types that can define C# compile-time constants (`string`, `char`, `sbyte`, `byte`, `short`, `int`, `long`, `uint`, `ushort`, `ulong`, `decimal`, `float`, `double`, `Enum`) and their `Nullable<T>` only.
+
+Parsed global options can be retrieved from `ConsoleAppContext.GlobalOptions`. Additionally, when combined with DI, you can retrieve them in a typed manner in each command.
+
+```csharp
+var app = ConsoleApp.Create();
+
+// builder: Func<ref ConsoleApp.GlobalOptionsBuilder, object>
+app.ConfigureGlobalOptions((ref builder) =>
+{
+    var dryRun = builder.AddGlobalOption<bool>("--dry-run");
+    var verbose = builder.AddGlobalOption<bool>("-v|--verbose");
+    var intParameter = builder.AddRequiredGlobalOption<int>("--int-parameter", "integer parameter");
+
+    // return value stored to ConsoleAppContext.GlobalOptions
+    return new GlobalOptions(dryRun, verbose, intParameter);
+});
+
+app.ConfigureServices((context, configuration, services) =>
+{
+    // store global-options to DI
+    var globalOptions = (GlobalOptions)context.GlobalOptions;
+    services.AddSingleton(globalOptions);
+
+    // check global-options value to configure services
+    services.AddLogging(logging =>
+    {
+        if (globalOptions.Verbose)
+        {
+            logging.SetMinimumLevel(LogLevel.Trace);
+        }
+    });
+});
+
+app.Add<Commands>();
+
+app.Run(args);
+
+internal record GlobalOptions(bool DryRun, bool Verbose, int IntParameter);
+
+// get GlobalOptions from DI
+internal class Commands(GlobalOptions globalOptions)
+{
+    [Command("cmd-a")]
+    public void CommandA(int x, int y)
+    {
+        Console.WriteLine("A:" + globalOptions + ":" + (x, y));
+    }
+
+    [Command("cmd-b")]
+    public void CommandB(int x, int y)
+    {
+        Console.WriteLine("B:" + globalOptions + ":" + (x, y));
+    }
+}
+```
 
 ### Custom Value Converter
 
@@ -638,8 +799,6 @@ While there are some standards for command-line arguments, such as UNIX tools an
 
 For example, specifications that change behavior based on `-x` and `-X` or allow bundling `-f -d -x` as `-fdx` are not easy to understand and also take time to parse. The poor performance of System.CommandLine may be influenced by its adherence to complex grammar. Therefore, ConsoleAppFramework prioritizes performance and clear rules. It uses lower-kebab-case as the basis while allowing case-insensitive matching. It does not support ambiguous grammar that cannot be processed in a single pass or takes time to parse.
 
-[System.CommandLine seems to be aiming for a new direction in .NET 9 and .NET 10](https://github.com/dotnet/command-line-api/issues/2338), but from a performance perspective, it will never surpass ConsoleAppFramework.
-
 CancellationToken(Gracefully Shutdown) and Timeout
 ---
 In ConsoleAppFramework, when you pass a `CancellationToken` as an argument, it can be used to check for interruption commands (SIGINT/SIGTERM/SIGKILL - Ctrl+C) rather than being treated as a parameter. For handling this, ConsoleAppFramework performs special code generation when a `CancellationToken` is included in the parameters.
@@ -662,16 +821,35 @@ The hooking behavior using `PosixSignalRegistration` is determined by the presen
 In the case of `Run/RunAsync` from `ConsoleAppBuilder`, you can also pass a CancellationToken. This is combined with PosixSignalRegistration and passed to each method. This makes it possible to cancel at any arbitrary timing.
 
 ```csharp
-var cancellationTokenSource = new CancellationTokenSource();
+// Create a CancellationTokenSource that will be cancelled when 'Q' is pressed.
+var cts = new CancellationTokenSource();
+_ = Task.Run(() =>
+{
+    while (Console.ReadKey().Key != ConsoleKey.Q) ;
+    Console.WriteLine();
+    cts.Cancel();
+});
 
 var app = ConsoleApp.Create();
 
-app.Add("", (CancellationToken cancellationToken) =>
+app.Add("", async (CancellationToken cancellationToken) =>
 {
-    // do anything...
+    // CancellationToken will be triggered when 'Q' is pressed or Ctrl+C(SIGINT/SIGTERM/SIGKILL) is sent.
+    try
+    {
+        for (int i = 0; i < 10; i++)
+        {
+            Console.WriteLine($"Running main task iteration {i + 1}/10. Press 'Q' to quit.");
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine("Main task was cancelled.");
+    }
 });
 
-await app.RunAsync(args, cancellationTokenSource.Token); // pass external CancellationToken
+await app.RunAsync(args, cts.Token); // pass external CancellationToken
 ```
 
 Exit Code
@@ -954,6 +1132,8 @@ app.Run(args);
 
 When passing to a lambda expression or method, the `[FromServices]` attribute is used to distinguish it from command parameters. When passing a class, Constructor Injection can be used, resulting in a simpler appearance. Lambda, method, constructor, filter, etc, all DI supported parameter also supports `[FromKeyedServices]`.
 
+`ConfigureServices` is called after command routing is completed and just before the actual parameter parsing process begins, and the generated ServiceProvider is set to the static `ConsoleApp.ServiceProvider`. If you set it without calling `ConfigureServices`, you can use DI without needing to reference `Microsoft.Extensions.DependencyInjection`.
+
 Let's try injecting a logger and enabling output to a file. The libraries used are Microsoft.Extensions.Logging and [Cysharp/ZLogger](https://github.com/Cysharp/ZLogger/) (a high-performance logger built on top of MS.E.Logging). If you are referencing `Microsoft.Extensions.Logging`, you can call `ConfigureLogging` from `ConsoleAppBuilder`.
 
 ```csharp
@@ -980,43 +1160,22 @@ public class MyCommand(ILogger<MyCommand> logger)
 }
 ```
 
-For building an `IServiceProvider`, `ConfigureServices/ConfigureLogging` uses `Microsoft.Extensions.DependencyInjection.ServiceCollection`. If you want to set a custom ServiceProvider or a ServiceProvider built from Host, or if you want to execute DI with `ConsoleApp.Run`, set it to `ConsoleApp.ServiceProvider`.
+`ConsoleApp` has replaceable default logging methods `ConsoleApp.Log` and `ConsoleApp.LogError` used for Help display and exception handling. If using `ILogger<T>`, it's better to replace these as well. `PostConfigureServices(Action<IServiceProvider> configure)` allows you to change own logger.
 
 ```csharp
-// Microsoft.Extensions.DependencyInjection
-var services = new ServiceCollection();
-services.AddTransient<MyService>();
-
-using var serviceProvider = services.BuildServiceProvider();
-
-// Any DI library can be used as long as it can create an IServiceProvider
-ConsoleApp.ServiceProvider = serviceProvider;
-
-// When passing to a lambda expression/method, using [FromServices] indicates that it is passed via DI, not as a parameter
-ConsoleApp.Run(args, ([FromServices]MyService service, int x, int y) => Console.WriteLine(x + y));
-```
-
-`ConsoleApp` has replaceable default logging methods `ConsoleApp.Log` and `ConsoleApp.LogError` used for Help display and exception handling. If using `ILogger<T>`, it's better to replace these as well.
-
-```csharp
-app.UseFilter<ReplaceLogFilter>();
-
-// inject logger to filter
-internal sealed class ReplaceLogFilter(ConsoleAppFilter next, ILogger<Program> logger)
-    : ConsoleAppFilter(next)
+app.PostConfigureServices((serviceProvider) =>
 {
-    public override Task InvokeAsync(ConsoleAppContext context, CancellationToken cancellationToken)
-    {
-        ConsoleApp.Log = msg => logger.LogInformation(msg);
-        ConsoleApp.LogError = msg => logger.LogError(msg);
+    var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
 
-        return Next.InvokeAsync(context, cancellationToken);
-    }
-}
+    ConsoleApp.Log = msg => logger.LogInformation(msg);
+    ConsoleApp.LogError = msg => logger.LogError(msg);
+});
 ```
 
 > I don't recommend using `ConsoleApp.Log` and `ConsoleApp.LogError` directly as an application logging method, as they are intended to be used as output destinations for internal framework output.
 > For error handling, it would be better to define your own custom filters for error handling, which would allow you to record more details when handling errors.
+
+> Since the help display is executed before routing, `ConfigureServices` is not called. In other words, it is impossible to change the logger for the help display using this method.
 
 DI can also be effectively used when reading application configuration from `appsettings.json`. For example, suppose you have the following JSON file.
 
@@ -1074,6 +1233,8 @@ When `Microsoft.Extensions.Configuration` is imported, `ConfigureEmptyConfigurat
 
 Furthermore, overloads of `Action<IConfiguration, IServiceCollection> configure` and `Action<IConfiguration, ILoggingBuilder> configure` are added to `ConfigureServices` and `ConfigureLogging`, allowing you to retrieve the Configuration when executing the delegate.
 
+There are also overloads that receive ConsoleAppContext. If you want to obtain global options and build with them, you can use these overloads: `Action<ConsoleAppContext, IConfiguration, IServiceCollection>` and `Action<ConsoleAppContext, IConfiguration, ILoggingBuilder>`.
+
 without Hosting dependency, I've preferred these import packages.
 
 ```xml
@@ -1096,6 +1257,7 @@ internal class ServiceProviderScopeFilter(IServiceProvider serviceProvider, Cons
         // create Microsoft.Extensions.DependencyInjection scope
         await using var scope = serviceProvider.CreateAsyncScope();
 
+        // replace static ServiceProvider
         var originalServiceProvider = ConsoleApp.ServiceProvider;
         ConsoleApp.ServiceProvider = scope.ServiceProvider;
         try
@@ -1115,7 +1277,7 @@ However, since the construction of the filters is performed before execution, au
 If you have other applications such as ASP.NET in the entire project and want to use common DI and configuration set up using `Microsoft.Extensions.Hosting`, you can call `ToConsoleAppBuilder` from `IHostBuilder` or `HostApplicationBuilder`.
 
 ```csharp
-// Package Import: Microsoft.Extensions.Hosting
+// dotnet add package Microsoft.Extensions.Hosting
 var app = Host.CreateApplicationBuilder()
     .ToConsoleAppBuilder();
 ```
@@ -1123,6 +1285,41 @@ var app = Host.CreateApplicationBuilder()
 In this case, it builds the HostBuilder, creates a Scope for the ServiceProvider, and disposes of all of them after execution.
 
 ConsoleAppFramework has its own lifetime management (see the [CancellationToken(Gracefully Shutdown) and Timeout](#cancellationtokengracefully-shutdown-and-timeout) section), therefore it is handled correctly even without using `ConsoleLifetime`.
+
+If you want to use other DI container(like [DryIoc](https://github.com/dadhi/DryIoc)) without Microsoft.Extensions.Hosting, you can use `ConfigureContainer` and setup `IServiceProviderFactory`.
+
+```csharp
+// dotnet add package Microsoft.Extensions.DependencyInjection
+// dotnet add package DryIoc.Microsoft.DependencyInjection
+var app = ConsoleApp.Create()
+    // setup DryIoc as the DI container
+    .ConfigureContainer(new DryIocServiceProviderFactory(), container =>
+    {
+        container.Register<MyService>();
+    });
+
+app.Add("", ([FromServices] MyService service) => { });
+
+app.Run(args);
+```
+
+Similarly, when using [Autofac](https://github.com/autofac/Autofac), pass the `IServiceProviderFactory` provided by Autofac.
+
+```csharp
+// dotnet add package Microsoft.Extensions.DependencyInjection
+// dotnet add package Autofac.Extensions.DependencyInjection
+var app = ConsoleApp.Create()
+    .ConfigureContainer(new AutofacServiceProviderFactory(), builder =>
+    {
+        builder.RegisterType<MyService>();
+    });
+
+app.Add("", ([FromServices] MyService service) => { });
+
+app.Run(args);
+```
+
+If there is no class implementing `IServiceProviderFactory` in the DI library, you must implement it yourself.
 
 OpenTelemetry
 ---
@@ -1272,17 +1469,82 @@ Prevent ServiceProvider auto dispose
 When executing commands with `Run/RunAsync`, the ServiceProvider is automatically disposed. This becomes a problem when executing commands multiple times or when you want to use the ServiceProvider after the command finishes. In Run/RunAsync from ConsoleAppBuilder, you can stop the automatic disposal of ServiceProvider by setting `bool disposeServiceProvider` to `false`.
 
 ```csharp
-var app = ConsoleApp.Create();
-await app.RunAsync(args, disposeServiceProvider: false); // default is true
+try
+{
+    // If ConsoleAppFramework throws error/canceled, ExitCode will be set to non-zero.
+    while (Environment.ExitCode == 0)
+    {
+        var command = Console.ReadLine();
+        if (command == null) break;
+
+        await app.RunAsync(command.Split(' '), disposeServiceProvider: false);
+    }
+}
+finally
+{
+    // finally dispose ServiceProvider
+    (ConsoleApp.ServiceProvider as IDisposable)?.Dispose();
+}
 ```
 
 When `Microsoft.Extensions.Hosting` is referenced, `bool startHost, bool stopHost, bool disposeServiceProvider` become controllable. The defaults are all `true`.
 
 Colorize
 ---
-The framework doesn't support colorization directly; however, utilities like [Cysharp/Kokuban](https://github.com/Cysharp/Kokuban) make console colorization easy. Additionally, if you need spinners or updates single-line displays, you can also use it in combination with [mayuki/Kurukuru](https://github.com/mayuki/Kurukuru).
+The framework doesn't support colorization directly; however, utilities like [Cysharp/Kokuban](https://github.com/Cysharp/Kokuban) make console colorization easy. Additionally, if you need spinners or single-line updates, you can also use it in combination with [mayuki/Kurukuru](https://github.com/mayuki/Kurukuru).
 
-For more powerful Console UI support, you can also use it in combination with [Spectre.Console](https://spectreconsole.net/).
+For applications that require ultra-low-latency, high-throughput console output, consider using [PrettyConsole](https://github.com/dusrdev/PrettyConsole).
+
+For another console UI framework option, you can also use [Spectre.Console](https://spectreconsole.net/).
+
+Cli Schema
+---
+The dotnet command can output command and option information in JSON format using the `--cli-schema` option. These are useful when generating documentation or when trying to help LLM AI understand how to use command tools. In ConsoleAppFramework, by importing the `ConsoleAppFramework.CliSchema` package, you can call the `ConsoleAppBuilder.GetCliSchema()` method.
+
+```bash
+dotnet add package ConsoleAppFramework.CliSchema
+```
+
+```csharp
+var app = ConsoleApp.Create();
+app.Add("foo", (int x, int y) => { });
+
+// get cli-schema as objects
+CommandHelpDefinition[] schema = app.GetCliSchema();
+```
+
+`CommandHelpDefinition` is the same one used internally for help output.
+
+```csharp
+public record CommandHelpDefinition
+{
+    public string CommandName { get; }
+    public CommandOptionHelpDefinition[] Options { get; }
+    public string Description { get; }
+}
+
+public record CommandOptionHelpDefinition
+{
+    public string[] Options { get; }
+    public string Description { get; }
+    public string? DefaultValue { get; }
+    public string ValueTypeName { get; }
+    public int? Index { get; }
+    public bool IsRequired => DefaultValue == null && !IsParams;
+    public bool IsFlag { get; }
+    public bool IsParams { get; }
+    public bool IsHidden { get; }
+    public bool IsDefaultValueHidden { get; }
+    public string FormattedValueTypeName => "<" + ValueTypeName + ">";
+}
+```
+
+You can also convert it to JSON. Since `CliSchemaJsonSerializerContext` is provided, by passing it as a Serialize/Deserialize argument, you can perform Native AOT-compatible conversion.
+
+```csharp
+var json = JsonSerializer.Serialize(schema, CliSchemaJsonSerializerContext.Default.CommandHelpDefinitionArray);
+var schema2 = JsonSerializer.Deserialize(json, CliSchemaJsonSerializerContext.Default.CommandHelpDefinitionArray);
+```
 
 Publish to executable file
 ---
@@ -1295,6 +1557,8 @@ There are multiple ways to run a CLI application in .NET:
 `run` is convenient when you want to execute the `csproj` directly, such as for starting command tools in CI. `build` and `publish` are quite similar, so it's possible to discuss them in general terms, but it's a bit difficult to talk about the precise differences. For more details, it's a good idea to check out [`build` vs `publish` -- can they be friends? · Issue #26247 · dotnet/sdk](https://github.com/dotnet/sdk/issues/26247).
 
 Also, to run with Native AOT, please refer to the [Native AOT deployment overview](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/). In any case, ConsoleAppFramework thoroughly implements a dependency-free and reflection-free approach, so it shouldn't be an obstacle to execution.
+
+There is a method of distributing CLI tools by packaging them as [.NET tools](https://learn.microsoft.com/en-us/dotnet/core/tools/global-tools). Also, starting from .NET 10, it is possible to execute them directly from the package manager using [dotnet tool exec(dnx)](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-tool-exec).
 
 v4 -> v5 Migration Guide
 ---

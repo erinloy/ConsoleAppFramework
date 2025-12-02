@@ -1,13 +1,11 @@
 ﻿namespace ConsoleAppFramework.GeneratorTests;
 
-public class ConsoleAppBuilderTest(ITestOutputHelper output) : IDisposable
+public class ConsoleAppBuilderTest
 {
-    VerifyHelper verifier = new VerifyHelper(output, "CAF");
+    VerifyHelper verifier = new VerifyHelper("CAF");
 
-    public void Dispose() => Environment.ExitCode = 0;
-
-    [Fact]
-    public void BuilderRun()
+    [Test]
+    public async Task BuilderRun()
     {
         var code = """
 var builder = ConsoleApp.Create();
@@ -17,20 +15,18 @@ builder.Add("baz", int (int x, string y) => { Console.Write(x + y); return 10; }
 builder.Add("boz", async Task (int x) => { await Task.Yield(); Console.Write(x * 2); });
 builder.Run(args);
 """;
+        await verifier.Execute(code, "foo --x 10 --y 20", "30");
+        await verifier.Execute(code, "bar --x 20 --y 30", "50");
+        var exitCode = await verifier.Execute(code, "bar --x 20", "30");
+        await Assert.That(exitCode).IsZero();
+        exitCode = await verifier.Execute(code, "baz --x 40 --y takoyaki", "40takoyaki");
+        await Assert.That(exitCode).IsEqualTo(10);
 
-        verifier.Execute(code, "foo --x 10 --y 20", "30");
-        verifier.Execute(code, "bar --x 20 --y 30", "50");
-        verifier.Execute(code, "bar --x 20", "30");
-        Environment.ExitCode.ShouldBe(0);
-        verifier.Execute(code, "baz --x 40 --y takoyaki", "40takoyaki");
-        Environment.ExitCode.ShouldBe(10);
-        Environment.ExitCode = 0;
-
-        verifier.Execute(code, "boz --x 40", "80");
+        await verifier.Execute(code, "boz --x 40", "80");
     }
 
-    [Fact]
-    public void BuilderRunAsync()
+    [Test]
+    public async Task BuilderRunAsync()
     {
         var code = """
 var builder = ConsoleApp.Create();
@@ -41,19 +37,18 @@ builder.Add("boz", async Task (int x) => { await Task.Yield(); Console.Write(x *
 await builder.RunAsync(args);
 """;
 
-        verifier.Execute(code, "foo --x 10 --y 20", "30");
-        verifier.Execute(code, "bar --x 20 --y 30", "50");
-        verifier.Execute(code, "bar --x 20", "30");
-        Environment.ExitCode.ShouldBe(0);
-        verifier.Execute(code, "baz --x 40 --y takoyaki", "40takoyaki");
-        Environment.ExitCode.ShouldBe(10);
-        Environment.ExitCode = 0;
+        await verifier.Execute(code, "foo --x 10 --y 20", "30");
+        await verifier.Execute(code, "bar --x 20 --y 30", "50");
+        var exitCode = await verifier.Execute(code, "bar --x 20", "30");
+        await Assert.That(exitCode).IsZero();
+        exitCode = await verifier.Execute(code, "baz --x 40 --y takoyaki", "40takoyaki");
+        await Assert.That(exitCode).IsEqualTo(10);
 
-        verifier.Execute(code, "boz --x 40", "80");
+        await verifier.Execute(code, "boz --x 40", "80");
     }
 
-    [Fact]
-    public void AddClass()
+    [Test]
+    public async Task AddClass()
     {
         var code = """
 var builder = ConsoleApp.Create();
@@ -87,15 +82,15 @@ public class MyClass
 }
 """;
 
-        verifier.Execute(code, "do", "yeah");
-        verifier.Execute(code, "sum --x 1 --y 2", "3");
-        verifier.Execute(code, "echo --msg takoyaki", "takoyaki");
+        await verifier.Execute(code, "do", "yeah");
+        await verifier.Execute(code, "sum --x 1 --y 2", "3");
+        await verifier.Execute(code, "echo --msg takoyaki", "takoyaki");
     }
 
-    [Fact]
-    public void ClassDispose()
+    [Test]
+    public async Task ClassDispose()
     {
-        verifier.Execute("""
+        await verifier.Execute("""
 var builder = ConsoleApp.Create();
 builder.Add<MyClass>();
 builder.Run(args);
@@ -114,7 +109,7 @@ public class MyClass : IDisposable
 }
 """, "do", "yeah:disposed!");
 
-        verifier.Execute("""
+        await verifier.Execute("""
 var builder = ConsoleApp.Create();
 builder.Add<MyClass>();
 await builder.RunAsync(args);
@@ -133,7 +128,7 @@ public class MyClass : IDisposable
 }
 """, "do", "yeah:disposed!");
 
-        verifier.Execute("""
+        await verifier.Execute("""
 var builder = ConsoleApp.Create();
 builder.Add<MyClass>();
 await builder.RunAsync(args);
@@ -154,7 +149,7 @@ public class MyClass : IAsyncDisposable
 """, "do", "yeah:disposed!");
 
         // DisposeAsync: sync pattern
-        verifier.Execute("""
+        await verifier.Execute("""
 var builder = ConsoleApp.Create();
 builder.Add<MyClass>();
 builder.Run(args);
@@ -175,10 +170,10 @@ public class MyClass : IAsyncDisposable
 """, "do", "yeah:disposed!");
     }
 
-    [Fact]
-    public void ClassWithDI()
+    [Test]
+    public async Task ClassWithDI()
     {
-        verifier.Execute("""
+        await verifier.Execute("""
 var serviceCollection = new MiniDI();
 serviceCollection.Register(typeof(string), "hoge!");
 serviceCollection.Register(typeof(int), 9999);
@@ -215,8 +210,8 @@ public class MiniDI : IServiceProvider
 """, "do", "yeah:hoge!9999");
     }
 
-    [Fact]
-    public void CommandAttr()
+    [Test]
+    public async Task CommandAttr()
     {
         var code = """
 var builder = ConsoleApp.Create();
@@ -233,11 +228,11 @@ public class MyClass()
 }
 """;
 
-        verifier.Execute(code, "nomunomu", "yeah");
+        await verifier.Execute(code, "nomunomu", "yeah");
     }
 
-    [Fact]
-    public void CommandAttrWithFilter()
+    [Test]
+    public async Task CommandAttrWithFilter()
     {
         var code = """
 var builder = ConsoleApp.Create();
@@ -275,6 +270,40 @@ internal class NopFilter2(ConsoleAppFilter next)
 }
 """;
 
-        verifier.Execute(code, "nomunomu", "filter1-filter2-command");
+        await verifier.Execute(code, "nomunomu", "filter1-filter2-command");
+    }
+
+    [Test]
+    public async Task CommandAlias()
+    {
+        var code = """
+var app = ConsoleApp.Create();
+
+app.Add("build|b", () => { Console.Write("build ok"); });
+app.Add("test|t", () => { Console.Write("test ok");  });
+app.Add<Commands>();
+
+app.Run(args);
+
+public class Commands
+{
+    /// <summary>Analyze the current package and report errors, but don't build object files.</summary>
+    [Command("check|c")]
+    public void Check() { Console.Write("check ok"); }
+
+    /// <summary>Build this packages's and its dependencies' documenation.</summary>
+    [Command("doc|d")]
+    public void Doc() { Console.Write("doc ok"); }
+}
+""";
+
+        await verifier.Execute(code, "b", "build ok");
+        await verifier.Execute(code, "build", "build ok");
+        await verifier.Execute(code, "t", "test ok");
+        await verifier.Execute(code, "test", "test ok");
+        await verifier.Execute(code, "c", "check ok");
+        await verifier.Execute(code, "check", "check ok");
+        await verifier.Execute(code, "d", "doc ok");
+        await verifier.Execute(code, "doc", "doc ok");
     }
 }

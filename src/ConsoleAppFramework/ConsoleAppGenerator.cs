@@ -3,7 +3,10 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Collections.Immutable;
 using System.ComponentModel.Design;
+using System.Linq.Expressions;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Xml.Linq;
 
 namespace ConsoleAppFramework;
 
@@ -25,6 +28,7 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
                 var hasConfiguration = false;
                 var hasJsonConfiguration = false;
                 var hasHost = false;
+                var hasCliSchema = false;
 
                 foreach (var x in xs)
                 {
@@ -60,9 +64,15 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
                         hasHost = true;
                         continue;
                     }
+
+                    if (!hasCliSchema && name.EndsWith("ConsoleAppFramework.CliSchema.dll")) // CliConfigurationSchema
+                    {
+                        hasCliSchema = true;
+                        continue;
+                    }
                 }
 
-                return new DllReference(hasDependencyInjection, hasLogging, hasConfiguration, hasJsonConfiguration, hasHost);
+                return new DllReference(hasDependencyInjection, hasLogging, hasConfiguration, hasJsonConfiguration, hasHost, hasCliSchema);
             });
 
         context.RegisterSourceOutput(hasReferences, EmitConsoleAppConfigure);
@@ -89,8 +99,7 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
             {
                 if (node.IsKind(SyntaxKind.InvocationExpression))
                 {
-                    var invocationExpression = (node as InvocationExpressionSyntax);
-                    if (invocationExpression == null) return false;
+                    if (node is not InvocationExpressionSyntax invocationExpression) return false;
 
                     var expr = invocationExpression.Expression as MemberAccessExpressionSyntax;
                     if ((expr?.Expression as IdentifierNameSyntax)?.Identifier.Text == "ConsoleApp")
@@ -136,7 +145,7 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
 
                     var expr = invocationExpression.Expression as MemberAccessExpressionSyntax;
                     var methodName = expr?.Name.Identifier.Text;
-                    if (methodName is "Add" or "UseFilter" or "Run" or "RunAsync")
+                    if (methodName is "Add" or "UseFilter" or "Run" or "RunAsync" or "ConfigureGlobalOptions")
                     {
                         return true;
                     }
@@ -209,9 +218,10 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
         sb.AppendLine(ConsoleAppBaseCode.GeneratedCodeHeader);
         using (sb.BeginBlock("internal static partial class ConsoleApp"))
         {
-            var emitter = new Emitter();
-            var withId = new Emitter.CommandWithId(null, command, -1);
-            emitter.EmitRun(sb, withId, command.IsAsync);
+            var emitter = new Emitter(null);
+            var requiredParsableParameterCount = command.Parameters.Count(p => p.IsParsable && p.RequireCheckArgumentParsed);
+            var withId = new Emitter.CommandWithId(null, command, -1, requiredParsableParameterCount);
+            emitter.EmitRun(sb, withId, commandContext.IsAsync, null);
         }
         sourceProductionContext.AddSource("ConsoleApp.Run.g.cs", sb.ToString().ReplaceLineEndings());
 
@@ -219,7 +229,7 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
         help.AppendLine(ConsoleAppBaseCode.GeneratedCodeHeader);
         using (help.BeginBlock("internal static partial class ConsoleApp"))
         {
-            var emitter = new Emitter();
+            var emitter = new Emitter(null);
             emitter.EmitHelp(help, command);
         }
         sourceProductionContext.AddSource("ConsoleApp.Run.Help.g.cs", help.ToString().ReplaceLineEndings());
@@ -249,7 +259,8 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
             return;
         }
 
-        if (!hasRun && !hasRunAsync) return;
+        // need to generate template codes
+        // if (!hasRun && !hasRunAsync) return;
 
         var sb = new SourceBuilder(0);
         sb.AppendLine(ConsoleAppBaseCode.GeneratedCodeHeader);
@@ -263,7 +274,9 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
                 var command = new Emitter.CommandWithId(
                     FieldType: x!.BuildDelegateSignature(Emitter.CommandWithId.BuildCustomDelegateTypeName(i), out var delegateDef),
                     Command: x!,
-                    Id: i
+                    Id: i,
+
+                    RequiredParsableParameterCount: x!.Parameters.Count(p => p.IsParsable && p.RequireCheckArgumentParsed)
                 );
                 if (delegateDef != null)
                 {
@@ -280,7 +293,7 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
                 sb.AppendLine(d);
             }
 
-            var emitter = new Emitter();
+            var emitter = new Emitter(dllReference);
             emitter.EmitBuilder(sb, commandIds, hasRun, hasRunAsync);
         }
         sourceProductionContext.AddSource("ConsoleApp.Builder.g.cs", sb.ToString().ReplaceLineEndings());
@@ -292,8 +305,25 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
         using (help.BeginBlock("internal static partial class ConsoleApp"))
         using (help.BeginBlock("internal partial class ConsoleAppBuilder"))
         {
-            var emitter = new Emitter();
+            if (collectBuilderContext.GlobalOptions.Length != 0)
+            {
+                // quick-hack to override commandIds
+                var globalOptionParameters = collectBuilderContext.GlobalOptions.Select(x => x.ToDummyCommandParameter());
+                commandIds = commandIds.Select(x =>
+                    {
+                        var newCommand = x.Command with { Parameters = new(x.Command.Parameters.Concat(globalOptionParameters).ToArray()) };
+                        return x with { Command = newCommand };
+                    })
+                    .ToArray();
+            }
+
+            var emitter = new Emitter(dllReference);
             emitter.EmitHelp(help, commandIds!);
+
+            if (dllReference.HasCliSchema)
+            {
+                emitter.EmitCliSchema(help, commandIds!);
+            }
         }
         sourceProductionContext.AddSource("ConsoleApp.Builder.Help.g.cs", help.ToString().ReplaceLineEndings());
     }
@@ -325,7 +355,7 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
         {
             var sb2 = sb.Clone();
             sb2.AppendLine("using Microsoft.Extensions.Hosting;");
-            var emitter = new Emitter();
+            var emitter = new Emitter(dllReference);
             emitter.EmitAsConsoleAppBuilder(sb2, dllReference);
             sourceProductionContext.AddSource("ConsoleAppHostBuilderExtensions.g.cs", sb2.ToString().ReplaceLineEndings());
         }
@@ -333,7 +363,7 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
         using (sb.BeginBlock("internal static partial class ConsoleApp"))
         using (sb.BeginBlock("internal partial class ConsoleAppBuilder"))
         {
-            var emitter = new Emitter();
+            var emitter = new Emitter(dllReference);
             emitter.EmitConfigure(sb, dllReference);
         }
 
@@ -368,6 +398,8 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
 
         FilterInfo[]? globalFilters { get; }
         ConsoleAppFrameworkGeneratorOptions generatorOptions { get; }
+
+        public GlobalOptionInfo[] GlobalOptions { get; } = [];
 
         public CollectBuilderContext(ConsoleAppFrameworkGeneratorOptions generatorOptions, ImmutableArray<(BuilderContext, string?, SymbolKind?)> contexts, CancellationToken cancellationToken)
         {
@@ -474,6 +506,26 @@ public partial class ConsoleAppGenerator : IIncrementalGenerator
 
                     return commands;
                 });
+
+            var configureGlobalOptionsGroup = methodGroup["ConfigureGlobalOptions"];
+            if (configureGlobalOptionsGroup.Count() >= 2)
+            {
+                var node = configureGlobalOptionsGroup.Last().Item1.Node;
+
+                DiagnosticReporter.ReportDiagnostic(DiagnosticDescriptors.DuplicateConfigureGlobalOptions, node.Expression.GetLocation());
+            }
+
+            if (configureGlobalOptionsGroup.Count() == 1)
+            {
+                var configureGlobalOptions = configureGlobalOptionsGroup.First();
+
+                var node = configureGlobalOptions.Item1.Node;
+                var model = configureGlobalOptions.Item1.Model;
+                var wellKnownTypes = new WellKnownTypes(model.Compilation);
+
+                var parser = new Parser(generatorOptions, DiagnosticReporter, node, model, wellKnownTypes, DelegateBuildType.None, globalFilters);
+                GlobalOptions = parser.ParseGlobalOptions();
+            }
 
             if (DiagnosticReporter.HasDiagnostics)
             {

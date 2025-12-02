@@ -47,6 +47,13 @@ public static class CommandHelpBuilder
         return BuildHelpMessageCore(command, showCommandName: command.Name != "", showCommand: false);
     }
 
+    public static string BuildCliSchema(IEnumerable<Command> commands)
+    {
+        return "return new CommandHelpDefinition[] {\n"
+            + string.Join(", \n", commands.Select(x => CreateCommandHelpDefinition(x).ToCliSchema()))
+            + "\n};";
+    }
+
     static string BuildHelpMessageCore(Command command, bool showCommandName, bool showCommand)
     {
         var definition = CreateCommandHelpDefinition(command);
@@ -161,7 +168,7 @@ public static class CommandHelpBuilder
         var optionsFormatted = definition.Options
             .Where(x => !x.Index.HasValue)
             .Where(x => !x.IsHidden)
-            .Select(x => (Options: string.Join("|", x.Options) + (x.IsFlag ? string.Empty : $" {x.FormattedValueTypeName}{(x.IsParams ? "..." : "")}"), x.Description, x.IsRequired, x.IsFlag, x.DefaultValue))
+            .Select(x => (Options: string.Join(", ", x.Options) + (x.IsFlag ? string.Empty : $" {x.FormattedValueTypeName}{(x.IsParams ? "..." : "")}"), x.Description, x.IsRequired, x.IsFlag, x.DefaultValue, x.IsDefaultValueHidden))
             .ToArray();
 
         if (!optionsFormatted.Any()) return string.Empty;
@@ -196,17 +203,20 @@ public static class CommandHelpBuilder
             sb.Append("    ");
             sb.Append(opt.Description);
 
-            if (opt.IsFlag)
+            // Flags are optional by default; leave them untagged.
+            if (!opt.IsFlag)
             {
-                sb.Append($" (Optional)");
-            }
-            else if (opt.DefaultValue != null)
-            {
-                sb.Append($" (Default: {opt.DefaultValue})");
-            }
-            else if (opt.IsRequired)
-            {
-                sb.Append($" (Required)");
+                if (opt.DefaultValue != null)
+                {
+                    if (!opt.IsDefaultValueHidden)
+                    {
+                        sb.Append($" [Default: {opt.DefaultValue}]");
+                    }
+                }
+                else if (opt.IsRequired)
+                {
+                    sb.Append($" [Required]");
+                }
             }
         }
 
@@ -219,7 +229,7 @@ public static class CommandHelpBuilder
             .Where(x => !x.IsHidden)
             .Select(x =>
             {
-                return (Command: x.Name, x.Description);
+                return (Command: string.Join(", ", x.Name.Split('|')), x.Description);
             })
             .ToArray();
         maxWidth = formatted.Max(x => x.Command.Length);
@@ -275,13 +285,17 @@ public static class CommandHelpBuilder
                 {
                     options.Add(alias);
                 }
-                options.Add("--" + item.Name);
+                if (item.Name != null)
+                {
+                    options.Add("--" + item.Name);
+                }
             }
 
             var description = item.Description;
             var isFlag = item.Type.SpecialType == Microsoft.CodeAnalysis.SpecialType.System_Boolean;
             var isParams = item.IsParams;
             var isHidden = item.IsHidden;
+            var isDefaultValueHidden = item.IsDefaultValueHidden;
 
             var defaultValue = default(string);
             if (item.HasDefaultValue)
@@ -303,7 +317,7 @@ public static class CommandHelpBuilder
             }
 
             var paramTypeName = item.ToTypeShortString();
-            parameterDefinitions.Add(new CommandOptionHelpDefinition(options.Distinct().ToArray(), description, paramTypeName, defaultValue, index, isFlag, isParams, isHidden));
+            parameterDefinitions.Add(new CommandOptionHelpDefinition(options.Distinct().ToArray(), description, paramTypeName, defaultValue, index, isFlag, isParams, isHidden, isDefaultValueHidden));
         }
 
         var commandName = descriptor.Name;
@@ -326,6 +340,44 @@ public static class CommandHelpBuilder
             Options = options;
             Description = description;
         }
+
+        public string ToCliSchema()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"new CommandHelpDefinition(");
+            sb.AppendLine($"    \"{EscapeString(CommandName)}\",");
+            sb.AppendLine($"    new CommandOptionHelpDefinition[]");
+            sb.AppendLine($"    {{");
+
+            for (int i = 0; i < Options.Length; i++)
+            {
+                sb.Append("        ");
+                sb.Append(Options[i].ToCliSchema());
+                if (i < Options.Length - 1)
+                {
+                    sb.AppendLine(",");
+                }
+                else
+                {
+                    sb.AppendLine();
+                }
+            }
+
+            sb.AppendLine($"    }},");
+            sb.AppendLine($"    \"{EscapeString(Description)}\"");
+            sb.Append($")");
+
+            return sb.ToString();
+        }
+
+        private static string EscapeString(string str)
+        {
+            return str.Replace("\\", "\\\\")
+                      .Replace("\"", "\\\"")
+                      .Replace("\n", "\\n")
+                      .Replace("\r", "\\r")
+                      .Replace("\t", "\\t");
+        }
     }
 
     class CommandOptionHelpDefinition
@@ -335,14 +387,14 @@ public static class CommandHelpBuilder
         public string? DefaultValue { get; }
         public string ValueTypeName { get; }
         public int? Index { get; }
-
         public bool IsRequired => DefaultValue == null && !IsParams;
         public bool IsFlag { get; }
         public bool IsParams { get; }
         public bool IsHidden { get; }
+        public bool IsDefaultValueHidden { get; }
         public string FormattedValueTypeName => "<" + ValueTypeName + ">";
 
-        public CommandOptionHelpDefinition(string[] options, string description, string valueTypeName, string? defaultValue, int? index, bool isFlag, bool isParams, bool isHidden)
+        public CommandOptionHelpDefinition(string[] options, string description, string valueTypeName, string? defaultValue, int? index, bool isFlag, bool isParams, bool isHidden, bool isDefaultValueHidden)
         {
             Options = options;
             Description = description;
@@ -352,6 +404,25 @@ public static class CommandHelpBuilder
             IsFlag = isFlag;
             IsParams = isParams;
             IsHidden = isHidden;
+            IsDefaultValueHidden = isDefaultValueHidden;
+        }
+
+        public string ToCliSchema()
+        {
+            var optionsArray = string.Join(", ", Options.Select(o => $"\"{EscapeString(o)}\""));
+            var defaultValueStr = DefaultValue == null ? "null" : $"\"{EscapeString(DefaultValue)}\"";
+            var indexStr = Index.HasValue ? Index.Value.ToString() : "null";
+
+            return $"new CommandOptionHelpDefinition(new[] {{ {optionsArray} }}, \"{EscapeString(Description)}\", \"{EscapeString(ValueTypeName)}\", {defaultValueStr}, {indexStr}, {IsFlag.ToString().ToLower()}, {IsParams.ToString().ToLower()}, {IsHidden.ToString().ToLower()}, {IsDefaultValueHidden.ToString().ToLower()})";
+        }
+
+        private static string EscapeString(string str)
+        {
+            return str.Replace("\\", "\\\\")
+                      .Replace("\"", "\\\"")
+                      .Replace("\n", "\\n")
+                      .Replace("\r", "\\r")
+                      .Replace("\t", "\\t");
         }
     }
 }

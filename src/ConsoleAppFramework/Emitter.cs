@@ -1,11 +1,11 @@
-﻿using Microsoft.CodeAnalysis;
-using System.Reflection.Metadata;
+﻿using System.Text;
+using Microsoft.CodeAnalysis;
 
 namespace ConsoleAppFramework;
 
-internal class Emitter
+internal class Emitter(DllReference? dllReference) // from EmitConsoleAppRun, null.
 {
-    public void EmitRun(SourceBuilder sb, CommandWithId commandWithId, bool isRunAsync, string? methodName = null)
+    public void EmitRun(SourceBuilder sb, CommandWithId commandWithId, bool isRunAsync, string? methodName)
     {
         var command = commandWithId.Command;
 
@@ -15,23 +15,23 @@ internal class Emitter
         var hasArgument = command.Parameters.Any(x => x.IsArgument);
         var hasValidation = command.Parameters.Any(x => x.HasValidation);
         var parsableParameterCount = command.Parameters.Count(x => x.IsParsable);
-        var requiredParsableParameterCount = command.Parameters.Count(x => x.IsParsable && x.RequireCheckArgumentParsed);
 
         if (command.HasFilter)
         {
+            // filter no needs special emit before parse
             isRunAsync = true;
             hasCancellationToken = false;
             hasConsoleAppContext = false;
         }
         var returnType = isRunAsync ? "async Task" : "void";
-        var accessibility = !emitForBuilder ? "public" : "private";
-        methodName = methodName ?? (isRunAsync ? "RunAsync" : "Run");
+        var accessibility = !emitForBuilder ? "public static" : "private";
+        methodName ??= (isRunAsync ? "RunAsync" : "Run");
         var unsafeCode = (command.MethodKind == MethodKind.FunctionPointer) ? "unsafe " : "";
 
         var commandMethodType = command.BuildDelegateSignature(commandWithId.BuildCustomDelegateTypeName(), out var delegateType);
         if (commandMethodType != null)
         {
-            commandMethodType = $", {commandMethodType} command";
+            commandMethodType = $"{commandMethodType} command";
         }
 
         // emit custom delegate type
@@ -41,10 +41,8 @@ internal class Emitter
             sb.AppendLine();
         }
 
-        var commandDepthEscapeIndex = emitForBuilder ? ", int commandDepth, int escapeIndex" : "";
-        var filterCancellationToken = command.HasFilter ? ", ConsoleAppContext context, CancellationToken cancellationToken"
-                                    : emitForBuilder ? ", CancellationToken __ExternalCancellationToken__"
-                                    : "";
+        var cancellationTokenName = emitForBuilder ? "cancellationToken" : null;
+        var cancellationTokenParameter = cancellationTokenName != null ? "CancellationToken cancellationToken" : null;
 
         if (!emitForBuilder)
         {
@@ -59,89 +57,155 @@ internal class Emitter
             sb.AppendLine("/// </summary>");
         }
 
-        // method signature
-        using (sb.BeginBlock($"{accessibility} static {unsafeCode}{returnType} {methodName}(string[] args{commandDepthEscapeIndex}{commandMethodType}{filterCancellationToken})"))
+        if (emitForBuilder && command.IsRequireDynamicDependencyAttribute)
         {
-            if (emitForBuilder)
+            sb.AppendLine(command.BuildDynamicDependencyAttribute());
+        }
+
+        var methodArgument = command.HasFilter
+            ? Join(", ", commandMethodType, "ConsoleAppContext context", "CancellationToken cancellationToken")
+            : Join(", ", "string[] args", (emitForBuilder ? "int commandDepth" : ""), commandMethodType, cancellationTokenParameter);
+
+        using (sb.BeginBlock($"{accessibility} {unsafeCode}{returnType} {methodName}({methodArgument})"))
+        {
+            using (command.HasFilter ? sb.Nop : sb.BeginBlock("try"))
             {
-                sb.AppendLine("var commandArgs = (escapeIndex == -1) ? args.AsSpan(commandDepth) : args.AsSpan(commandDepth, escapeIndex - commandDepth);");
-            }
-            else
-            {
-                if (hasConsoleAppContext)
+                // prepare commandArgsMemory
+                var noCommandArgsMemory = false;
+                if (command.HasFilter)
                 {
-                    sb.AppendLine("var escapeIndex = args.AsSpan().IndexOf(\"--\");");
-                    sb.AppendLine("var commandArgs = (escapeIndex == -1) ? args.AsSpan() : args.AsSpan(0, escapeIndex);");
+                    sb.AppendLine("var commandArgsMemory = context.InternalCommandArgs;"); // already prepared and craeted ConsoleAppContext
                 }
                 else
                 {
-                    sb.AppendLine("var commandArgs = args.AsSpan();");
-                }
-            }
-
-            sb.AppendLine($"if (TryShowHelpOrVersion(commandArgs, {requiredParsableParameterCount}, {commandWithId.Id})) return;");
-            sb.AppendLine();
-
-            // prepare argument variables
-            if (hasCancellationToken)
-            {
-                var token = command.HasFilter ? "cancellationToken" : emitForBuilder ? "__ExternalCancellationToken__" : "CancellationToken.None";
-                sb.AppendLine($"using var posixSignalHandler = PosixSignalHandler.Register(Timeout, {token});");
-            }
-            if (hasConsoleAppContext)
-            {
-                sb.AppendLine($"var context = new ConsoleAppContext(\"{command.Name}\", args, null, {(emitForBuilder ? "commandDepth" : "0")}, escapeIndex);");
-            }
-            for (var i = 0; i < command.Parameters.Length; i++)
-            {
-                var parameter = command.Parameters[i];
-                if (parameter.IsParsable)
-                {
-                    var defaultValue = parameter.IsParams ? $"({parameter.ToTypeDisplayString()})[]"
-                                     : parameter.HasDefaultValue ? parameter.DefaultValueToString()
-                                     : $"default({parameter.Type.ToFullyQualifiedFormatDisplayString()})";
-                    sb.AppendLine($"var arg{i} = {defaultValue};");
-                    if (parameter.RequireCheckArgumentParsed)
+                    if (hasConsoleAppContext || emitForBuilder)
                     {
-                        sb.AppendLine($"var arg{i}Parsed = false;");
-                    }
-                }
-                else if (parameter.IsCancellationToken)
-                {
-                    if (command.HasFilter)
-                    {
-                        sb.AppendLine($"var arg{i} = cancellationToken;");
+                        sb.AppendLine("var escapeIndex = args.AsSpan().IndexOf(\"--\");");
+                        if (!emitForBuilder)
+                        {
+                            sb.AppendLine("var commandDepth = 0;");
+                        }
+
+                        sb.AppendLine("ReadOnlyMemory<string> commandArgsMemory = (escapeIndex == -1) ? args.AsMemory(commandDepth) : args.AsMemory(commandDepth, escapeIndex - commandDepth);");
                     }
                     else
                     {
-                        sb.AppendLine($"var arg{i} = posixSignalHandler.Token;");
+                        noCommandArgsMemory = true; // emit help directly
+                        sb.AppendLine($"ReadOnlySpan<string> commandArgs = args;");
+                        sb.AppendLine($"if (TryShowHelpOrVersion(commandArgs, {commandWithId.RequiredParsableParameterCount}, {commandWithId.Id})) return;");
                     }
                 }
-                else if (parameter.IsConsoleAppContext)
-                {
-                    sb.AppendLine($"var arg{i} = context;");
-                }
-                else if (parameter.IsFromServices)
-                {
-                    var type = parameter.Type.ToFullyQualifiedFormatDisplayString();
-                    sb.AppendLine($"var arg{i} = ({type})ServiceProvider!.GetService(typeof({type}))!;");
-                }
-                else if (parameter.IsFromKeyedServices)
-                {
-                    var type = parameter.Type.ToFullyQualifiedFormatDisplayString();
-                    var line = $"var arg{i} = ({type})((Microsoft.Extensions.DependencyInjection.IKeyedServiceProvider)ServiceProvider).GetKeyedService(typeof({type}), {parameter.GetFormattedKeyedServiceKey()})!;";
-                    sb.AppendLine(line);
-                }
-            }
-            sb.AppendLineIfExists(command.Parameters.AsSpan());
 
-            using (command.HasFilter ? sb.Nop : sb.BeginBlock("try"))
-            {
+                if (!noCommandArgsMemory)
+                {
+                    sb.AppendLine($"if (TryShowHelpOrVersion(commandArgsMemory.Span, {commandWithId.RequiredParsableParameterCount}, {commandWithId.Id})) return;");
+                }
+                sb.AppendLine();
+
+                // setup-timer
+                if (hasCancellationToken)
+                {
+                    sb.AppendLine($"using var posixSignalHandler = PosixSignalHandler.Register(Timeout, {cancellationTokenName ?? "CancellationToken.None"});");
+                    sb.AppendLine();
+                    cancellationTokenName = "posixSignalHandler.Token";
+                }
+
+                if (hasConsoleAppContext || (emitForBuilder && !command.HasFilter))
+                {
+                    if (emitForBuilder)
+                    {
+                        sb.AppendLine("ConsoleAppContext context;");
+                        using (hasConsoleAppContext ? sb.Nop : sb.BeginBlock("if (isRequireCallBuildAndSetServiceProvider)"))
+                        {
+                            using (sb.BeginBlock("if (configureGlobalOptions == null)"))
+                            {
+                                sb.AppendLine($"context = new ConsoleAppContext(\"{command.Name}\", args, commandArgsMemory, null, null, commandDepth, escapeIndex);");
+                            }
+                            using (sb.BeginBlock("else"))
+                            {
+                                sb.AppendLine("var builder = new GlobalOptionsBuilder(commandArgsMemory);");
+                                sb.AppendLine("var globalOptions = configureGlobalOptions(ref builder);");
+                                sb.AppendLine($"context = new ConsoleAppContext(\"{command.Name}\", args, builder.RemainingArgs, null, globalOptions, commandDepth, escapeIndex);");
+                                sb.AppendLine("commandArgsMemory = builder.RemainingArgs;");
+                            }
+                            sb.AppendLine("BuildAndSetServiceProvider(context);");
+                        }
+
+                        if (dllReference != null && dllReference.Value.HasHost)
+                        {
+                            sb.AppendLine("host = ConsoleApp.ServiceProvider?.GetService(typeof(Microsoft.Extensions.Hosting.IHost)) as Microsoft.Extensions.Hosting.IHost;");
+                            using (sb.BeginBlock("if (startHost && host != null)"))
+                            {
+                                if (isRunAsync)
+                                {
+                                    sb.AppendLine($"await host.StartAsync({cancellationTokenName});");
+                                }
+                                else
+                                {
+                                    sb.AppendLine($"host.StartAsync({cancellationTokenName}).GetAwaiter().GetResult();");
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        sb.AppendLine($"var context = new ConsoleAppContext(\"{command.Name}\", args, commandArgsMemory, null, null, commandDepth, escapeIndex);");
+                    }
+                    sb.AppendLine();
+                }
+
+                for (var i = 0; i < command.Parameters.Length; i++)
+                {
+                    var parameter = command.Parameters[i];
+                    if (parameter.IsParsable)
+                    {
+                        var defaultValue = parameter.IsParams ? $"({parameter.ToTypeDisplayString()})[]"
+                                         : parameter.HasDefaultValue ? parameter.DefaultValueToString()
+                                         : $"default({parameter.Type.ToFullyQualifiedFormatDisplayString()})";
+                        sb.AppendLine($"var arg{i} = {defaultValue};");
+                        if (parameter.RequireCheckArgumentParsed)
+                        {
+                            sb.AppendLine($"var arg{i}Parsed = false;");
+                        }
+                    }
+                    else if (parameter.IsCancellationToken)
+                    {
+                        if (command.HasFilter)
+                        {
+                            sb.AppendLine($"var arg{i} = cancellationToken;");
+                        }
+                        else
+                        {
+                            sb.AppendLine($"var arg{i} = posixSignalHandler.Token;");
+                        }
+                    }
+                    else if (parameter.IsConsoleAppContext)
+                    {
+                        sb.AppendLine($"var arg{i} = context;");
+                    }
+                    else if (parameter.IsFromServices)
+                    {
+                        var type = parameter.Type.ToFullyQualifiedFormatDisplayString();
+                        sb.AppendLine($"var arg{i} = ({type})ServiceProvider!.GetService(typeof({type}))!;");
+                    }
+                    else if (parameter.IsFromKeyedServices)
+                    {
+                        var type = parameter.Type.ToFullyQualifiedFormatDisplayString();
+                        var line = $"var arg{i} = ({type})((Microsoft.Extensions.DependencyInjection.IKeyedServiceProvider)ServiceProvider).GetKeyedService(typeof({type}), {parameter.GetFormattedKeyedServiceKey()})!;";
+                        sb.AppendLine(line);
+                    }
+                }
+                sb.AppendLineIfExists(command.Parameters.AsSpan());
+
                 if (hasArgument)
                 {
                     sb.AppendLine("var argumentPosition = 0;");
                 }
 
+                if (!noCommandArgsMemory)
+                {
+                    sb.AppendLine("var commandArgs = commandArgsMemory.Span;");
+                }
                 using (sb.BeginBlock("for (int i = 0; i < commandArgs.Length; i++)"))
                 {
                     sb.AppendLine("var name = commandArgs[i];");
@@ -320,7 +384,14 @@ internal class Emitter
 
                 if (hasCancellationToken)
                 {
-                    invokeCommand = $"Task.Run(() => {invokeCommand}).WaitAsync(posixSignalHandler.TimeoutToken)";
+                    if (command.IsAsync)
+                    {
+                        invokeCommand = $"{invokeCommand}.WaitAsync(posixSignalHandler.TimeoutToken)";
+                    }
+                    else
+                    {
+                        invokeCommand = $"Task.Run(() => {invokeCommand}).WaitAsync(posixSignalHandler.TimeoutToken)";
+                    }
                 }
                 if (command.IsAsync || hasCancellationToken)
                 {
@@ -399,8 +470,10 @@ internal class Emitter
 
     public void EmitBuilder(SourceBuilder sb, CommandWithId[] commandIds, bool emitSync, bool emitAsync)
     {
-        // grouped by path
-        var commandGroup = commandIds.ToLookup(x => x.Command.Name.Split(' ')[0]);
+        // split command-alias and grouped by path
+        var commandGroup = commandIds
+            .SelectMany(x => x.Command.Name.Split('|'), (command, name) => command with { Command = command.Command with { Name = name } })
+            .ToLookup(x => x.Command.Name.Split(' ')[0]);
         var hasRootCommand = commandIds.Any(x => x.Command.IsRootCommand);
 
         using (sb.BeginBlock("partial class ConsoleAppBuilder"))
@@ -520,7 +593,12 @@ internal class Emitter
             {
                 ifBlock = sb.BeginBlock($"if (args.Length == {depth})");
             }
-            EmitLeafCommand(leafCommand);
+
+            var shouldShowGlobalHelp =
+                ifBlock != null &&
+                leafCommand is { Command.IsRootCommand: true, RequiredParsableParameterCount: > 0 };
+
+            EmitLeafCommand(shouldShowGlobalHelp ? null : leafCommand);
             if (ifBlock != null)
             {
                 sb.AppendLine("return;");
@@ -583,16 +661,18 @@ internal class Emitter
                     {
                         if (!isRunAsync)
                         {
-                            sb.AppendLine($"RunCommand{command.Id}(args, {depth}, args.AsSpan().IndexOf(\"--\"){commandArgs}, cancellationToken);");
+                            sb.AppendLine($"RunCommand{command.Id}(args, {depth}{commandArgs}, cancellationToken);");
                         }
                         else
                         {
-                            sb.AppendLine($"result = RunCommand{command.Id}Async(args, {depth}, args.AsSpan().IndexOf(\"--\"){commandArgs}, cancellationToken);");
+                            sb.AppendLine($"result = RunCommand{command.Id}Async(args, {depth}{commandArgs}, cancellationToken);");
                         }
                     }
                     else
                     {
-                        var invokeCode = $"RunWithFilterAsync(\"{command.Command.Name}\", args, {depth}, args.AsSpan().IndexOf(\"--\"), new Command{command.Id}Invoker({commandArgs.TrimStart(',', ' ')}).BuildFilter(), cancellationToken)";
+                        var invokerArgument = commandArgs.TrimStart(',', ' ');
+                        invokerArgument = (invokerArgument != "") ? $"this, {invokerArgument}" : "this";
+                        var invokeCode = $"RunWithFilterAsync(\"{command.Command.Name}\", args, {depth}, new Command{command.Id}Invoker({invokerArgument}), cancellationToken)";
                         if (!isRunAsync)
                         {
                             sb.AppendLine($"{invokeCode}.GetAwaiter().GetResult();");
@@ -611,8 +691,9 @@ internal class Emitter
             var commandType = command.Command.BuildDelegateSignature(command.BuildCustomDelegateTypeName(), out _);
             var needsCommand = commandType != null;
             if (needsCommand) commandType = $"{commandType} command";
+            if (!string.IsNullOrEmpty(commandType)) commandType = ", " + commandType;
 
-            using (sb.BeginBlock($"sealed class Command{command.Id}Invoker({commandType}) : ConsoleAppFilter(null!)"))
+            using (sb.BeginBlock($"sealed class Command{command.Id}Invoker(ConsoleAppBuilder builder{commandType}) : ConsoleAppFilter(null!), IFilterFactory"))
             {
                 using (sb.BeginBlock($"public ConsoleAppFilter BuildFilter()"))
                 {
@@ -628,8 +709,8 @@ internal class Emitter
                 sb.AppendLine();
                 using (sb.BeginBlock($"public override Task InvokeAsync(ConsoleAppContext context, CancellationToken cancellationToken)"))
                 {
-                    var cmdArgs = needsCommand ? ", command" : "";
-                    sb.AppendLine($"return RunCommand{command.Id}Async(context.Arguments, context.CommandDepth, context.EscapeIndex{cmdArgs}, context, cancellationToken);");
+                    var cmdArgs = needsCommand ? "command, " : "";
+                    sb.AppendLine($"return builder.RunCommand{command.Id}Async({cmdArgs}context, cancellationToken);");
                 }
             }
         }
@@ -646,6 +727,7 @@ internal class Emitter
         }
     }
 
+    // for multiple commands(Builder)
     public void EmitHelp(SourceBuilder sb, CommandWithId[] commands)
     {
         using (sb.BeginBlock("static partial void ShowHelp(int helpId)"))
@@ -671,6 +753,14 @@ internal class Emitter
                     sb.AppendLine("break;");
                 }
             }
+        }
+    }
+
+    public void EmitCliSchema(SourceBuilder sb, CommandWithId[] commands)
+    {
+        using (sb.BeginBlock("public CommandHelpDefinition[] GetCliSchema()"))
+        {
+            sb.AppendLine(CommandHelpBuilder.BuildCliSchema(commands.Select(x => x.Command)));
         }
     }
 
@@ -722,95 +812,168 @@ internal class Emitter
         // DependencyInjection
         if (dllReference.HasDependencyInjection)
         {
+            // field
             if (dllReference.HasConfiguration)
             {
-                sb.AppendLine("Action<IConfiguration, IServiceCollection>? configureServices;");
+                sb.AppendLine("Action<ConsoleAppContext, IConfiguration, IServiceCollection>? configureServices;");
             }
             else
             {
-                sb.AppendLine("Action<IServiceCollection>? configureServices;");
+                sb.AppendLine("Action<ConsoleAppContext, IServiceCollection>? configureServices;");
             }
+            sb.AppendLine("Func<IServiceCollection, IServiceProvider>? createServiceProvider;");
+            sb.AppendLine("Action<IServiceProvider>? postConfigureServices;");
 
-            sb.AppendLine();
-            using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureServices(Action<IServiceCollection> configure)"))
-            {
-                if (dllReference.HasConfiguration)
-                {
-                    sb.AppendLine("this.configureServices = (_, services) => configure(services);");
-                }
-                else
-                {
-                    sb.AppendLine("this.configureServices = configure;");
-                }
-                sb.AppendLine("return this;");
-            }
-
+            // methods
             if (dllReference.HasConfiguration)
             {
                 sb.AppendLine();
+                using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureServices(Action<IServiceCollection> configure)"))
+                {
+                    sb.AppendLine("this.configureServices = (_, _, services) => configure(services);");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                    sb.AppendLine("return this;");
+                }
+
+                sb.AppendLine();
                 using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureServices(Action<IConfiguration, IServiceCollection> configure)"))
+                {
+                    // for backward-compatiblity, we chooce (IConfiguration, IServiceCollection) for two arguments overload
+                    sb.AppendLine("this.requireConfiguration = true;");
+                    sb.AppendLine("this.configureServices = (_, configuration, services) => configure(configuration, services);");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                    sb.AppendLine("return this;");
+                }
+
+                sb.AppendLine();
+                using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureServices(Action<ConsoleAppContext, IConfiguration, IServiceCollection> configure)"))
                 {
                     sb.AppendLine("this.requireConfiguration = true;");
                     sb.AppendLine("this.configureServices = configure;");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
                     sb.AppendLine("return this;");
                 }
             }
+            else
+            {
+                sb.AppendLine();
+                using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureServices(Action<IServiceCollection> configure)"))
+                {
+                    sb.AppendLine("this.configureServices = (_, services) => configure(services);");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                    sb.AppendLine("return this;");
+                }
+
+                sb.AppendLine();
+                using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureServices(Action<ConsoleAppContext, IServiceCollection> configure)"))
+                {
+                    sb.AppendLine("this.configureServices = configure;");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                    sb.AppendLine("return this;");
+                }
+            }
+
+            sb.AppendLine();
+            using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder PostConfigureServices(Action<IServiceProvider> configure)"))
+            {
+                sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                sb.AppendLine("this.postConfigureServices = configure;");
+                sb.AppendLine("return this;");
+            }
+
+            sb.AppendLine();
+            using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureContainer<TContainerBuilder>(IServiceProviderFactory<TContainerBuilder> factory, Action<TContainerBuilder>? configure = null) where TContainerBuilder : notnull"))
+            {
+                sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                using (sb.BeginBlock("createServiceProvider = services =>"))
+                {
+                    sb.AppendLine("var containerBuilder = factory.CreateBuilder(services);");
+                    sb.AppendLine("configure?.Invoke(containerBuilder);");
+                    sb.AppendLine("return factory.CreateServiceProvider(containerBuilder);");
+                }
+                sb.AppendLine(";");
+
+                sb.AppendLine("return this;");
+            }
+
             sb.AppendLine();
         }
 
         // Logging
         if (dllReference.HasLogging)
         {
+            // field
             if (dllReference.HasConfiguration)
             {
-                sb.AppendLine("Action<IConfiguration, ILoggingBuilder>? configureLogging;");
+                sb.AppendLine("Action<ConsoleAppContext, IConfiguration, ILoggingBuilder>? configureLogging;");
             }
             else
             {
-                sb.AppendLine("Action<ILoggingBuilder>? configureLogging;");
+                sb.AppendLine("Action<ConsoleAppContext, ILoggingBuilder>? configureLogging;");
             }
 
-            sb.AppendLine();
-            using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureLogging(Action<ILoggingBuilder> configure)"))
-            {
-                if (dllReference.HasConfiguration)
-                {
-                    sb.AppendLine("this.configureLogging = (_, logging) => configure(logging);");
-                }
-                else
-                {
-                    sb.AppendLine("this.configureLogging = configure;");
-                }
-                sb.AppendLine("return this;");
-            }
-
+            // methods
             if (dllReference.HasConfiguration)
             {
+                sb.AppendLine();
+                using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureLogging(Action<ILoggingBuilder> configure)"))
+                {
+                    sb.AppendLine("this.configureLogging = (_, _, logging) => configure(logging);");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                    sb.AppendLine("return this;");
+                }
+
                 sb.AppendLine();
                 using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureLogging(Action<IConfiguration, ILoggingBuilder> configure)"))
                 {
                     sb.AppendLine("this.requireConfiguration = true;");
+                    sb.AppendLine("this.configureLogging = (_, configuration, logging) => configure(configuration, logging);");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                    sb.AppendLine("return this;");
+                }
+
+                sb.AppendLine();
+                using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureLogging(Action<ConsoleAppContext, IConfiguration, ILoggingBuilder> configure)"))
+                {
+                    sb.AppendLine("this.requireConfiguration = true;");
                     sb.AppendLine("this.configureLogging = configure;");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
                     sb.AppendLine("return this;");
                 }
             }
+            else
+            {
+                sb.AppendLine();
+                using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureLogging(Action<ILoggingBuilder> configure)"))
+                {
+                    sb.AppendLine("this.configureLogging = (_, logging) => configure(logging);");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                    sb.AppendLine("return this;");
+                }
+
+                sb.AppendLine();
+                using (sb.BeginBlock("public ConsoleApp.ConsoleAppBuilder ConfigureLogging(Action<ConsoleAppContext, ILoggingBuilder> configure)"))
+                {
+                    sb.AppendLine("this.configureLogging = configure;");
+                    sb.AppendLine("this.isRequireCallBuildAndSetServiceProvider = true;");
+                    sb.AppendLine("return this;");
+                }
+            }
+
             sb.AppendLine();
         }
 
         // Build
-        using (sb.BeginBlock("partial void BuildAndSetServiceProvider()"))
+        using (sb.BeginBlock("partial void BuildAndSetServiceProvider(ConsoleAppContext context)"))
         {
-            if (dllReference.HasDependencyInjection && dllReference.HasLogging)
-            {
-                sb.AppendLine("if (configureServices == null && configureLogging == null) return;");
-            }
-            else if (dllReference.HasDependencyInjection)
-            {
-                sb.AppendLine("if (configureServices == null) return;");
-            }
-
             if (dllReference.HasDependencyInjection)
             {
+                using (sb.BeginBlock("if (!isRequireCallBuildAndSetServiceProvider)"))
+                {
+                    sb.AppendLine("return;");
+                }
+                sb.AppendLine("isRequireCallBuildAndSetServiceProvider = false;");
+
                 if (dllReference.HasConfiguration)
                 {
                     sb.AppendLine("var config = configuration;");
@@ -823,11 +986,11 @@ internal class Emitter
                 sb.AppendLine("var services = new ServiceCollection();");
                 if (dllReference.HasConfiguration)
                 {
-                    sb.AppendLine("configureServices?.Invoke(configuration!, services);");
+                    sb.AppendLine("configureServices?.Invoke(context, config!, services);");
                 }
                 else
                 {
-                    sb.AppendLine("configureServices?.Invoke(services);");
+                    sb.AppendLine("configureServices?.Invoke(context, services);");
                 }
 
                 if (dllReference.HasLogging)
@@ -839,18 +1002,41 @@ internal class Emitter
                         {
                             if (dllReference.HasConfiguration)
                             {
-                                sb.AppendLine("configure!(config!, logging);");
+                                sb.AppendLine("configure!(context, config!, logging);");
                             }
                             else
                             {
-                                sb.AppendLine("configure!(logging);");
+                                sb.AppendLine("configure!(context, logging);");
                             }
                         }
                         sb.AppendLine("});");
                     }
                 }
 
-                sb.AppendLine("ConsoleApp.ServiceProvider = services.BuildServiceProvider();");
+                using (sb.BeginBlock("if (createServiceProvider != null)"))
+                {
+                    sb.AppendLine("ConsoleApp.ServiceProvider = createServiceProvider.Invoke(services);");
+                }
+                using (sb.BeginBlock("else"))
+                {
+                    sb.AppendLine("ConsoleApp.ServiceProvider = services.BuildServiceProvider();");
+                }
+
+                sb.AppendLine("postConfigureServices?.Invoke(ConsoleApp.ServiceProvider);");
+            }
+        }
+
+        // HostStart(for filter)
+        if (dllReference.HasHost)
+        {
+            sb.AppendLine();
+            using (sb.BeginBlock("partial void StartHostAsyncIfNeeded(CancellationToken cancellationToken, ref Task task)"))
+            {
+                sb.AppendLine("Microsoft.Extensions.Hosting.IHost? host = ConsoleApp.ServiceProvider?.GetService(typeof(Microsoft.Extensions.Hosting.IHost)) as Microsoft.Extensions.Hosting.IHost;");
+                using (sb.BeginBlock("if (startHost && host != null)"))
+                {
+                    sb.AppendLine("task = host.StartAsync(cancellationToken);");
+                }
             }
         }
     }
@@ -939,7 +1125,22 @@ internal static class ConsoleAppHostBuilderExtensions
 """);
     }
 
-    internal record CommandWithId(string? FieldType, Command Command, int Id)
+    string Join(string separator, params string?[] args)
+    {
+        var sb = new StringBuilder();
+        var first = true;
+        foreach (var item in args)
+        {
+            if (string.IsNullOrEmpty(item)) continue;
+
+            if (first) first = false;
+            else sb.Append(separator);
+            sb.Append(item);
+        }
+        return sb.ToString();
+    }
+
+    internal record CommandWithId(string? FieldType, Command Command, int Id, int RequiredParsableParameterCount)
     {
         public static string BuildCustomDelegateTypeName(int id)
         {

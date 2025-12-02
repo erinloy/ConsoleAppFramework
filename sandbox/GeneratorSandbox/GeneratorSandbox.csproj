@@ -2,8 +2,8 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
-    <LangVersion>13</LangVersion>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
 
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
@@ -16,15 +16,25 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.6" />
+
+    <PackageReference Include="Autofac.Extensions.DependencyInjection" Version="10.0.0" />
+
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.6" />
+    <!--<PackageReference Include="DryIoc.Microsoft.DependencyInjection" Version="6.2.0" />-->
+
+    <!--<PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.6" />-->
+    <!--
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.6" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.6" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.9.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.9.0" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.9.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.9.0" />-->
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ConsoleAppFramework.Abstractions\ConsoleAppFramework.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\ConsoleAppFramework.CliSchema\ConsoleAppFramework.CliSchema.csproj" />
     <ProjectReference Include="..\..\src\ConsoleAppFramework\ConsoleAppFramework.csproj">
       <OutputItemType>Analyzer</OutputItemType>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>

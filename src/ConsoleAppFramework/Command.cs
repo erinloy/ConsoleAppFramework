@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using System.Globalization;
 using System.Text;
 
 namespace ConsoleAppFramework;
@@ -31,6 +32,7 @@ public record class Command
     public required EquatableArray<FilterInfo> Filters { get; init; }
     public IgnoreEquality<ISymbol> Symbol { get; init; }
     public bool HasFilter => Filters.Length != 0;
+    public bool IsRequireDynamicDependencyAttribute { get; set; } // can set...!
 
     // return is delegateType(Name).
     public string? BuildDelegateSignature(string customDelegateTypeName, out string? customDelegateDefinition)
@@ -145,6 +147,23 @@ public record class Command
         var parameters = string.Join(", ", Parameters.Select(x => x.ToString()));
         return $"delegate {retType} {delegateName}({parameters});";
     }
+
+    public string BuildDynamicDependencyAttribute()
+    {
+        if (!IsRequireDynamicDependencyAttribute) return "";
+
+        var dynamicDependencyMethod = Symbol.Value as IMethodSymbol;
+        if (dynamicDependencyMethod == null) return "";
+
+        var docCommentId = dynamicDependencyMethod.GetDocumentationCommentId();
+        var parameterPartIndex = docCommentId?.IndexOf('(') ?? -1;
+        var memberSignature = parameterPartIndex >= 0
+            ? dynamicDependencyMethod.Name + docCommentId!.Substring(parameterPartIndex)
+            : dynamicDependencyMethod.Name;
+
+        var containingType = dynamicDependencyMethod.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        return $"[global::System.Diagnostics.CodeAnalysis.DynamicDependency(\"{memberSignature}\", typeof({containingType}))]";
+    }
 }
 
 public record class CommandParameter
@@ -155,6 +174,7 @@ public record class CommandParameter
     public required bool IsNullableReference { get; init; }
     public required bool IsParams { get; init; }
     public required bool IsHidden { get; init; } // Hide command parameter help
+    public required bool IsDefaultValueHidden { get; init; } // Hide default value in command parameter help
     public required string Name { get; init; }
     public required string OriginalParameterName { get; init; }
     public required bool HasDefaultValue { get; init; }
@@ -234,7 +254,8 @@ public record class CommandParameter
                     // Enum
                     if (type.TypeKind == TypeKind.Enum)
                     {
-                        return $"if ({incrementIndex}!Enum.TryParse<{type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>(commandArgs[i], true, {outArgVar})) {{ ThrowArgumentParseFailed(\"{argumentName}\", commandArgs[i]); }}{elseExpr}";
+                        string typeName = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                        return $"if ({incrementIndex}!Enum.TryParse<{typeName}>(commandArgs[i], true, {outArgVar})) {{ ThrowArgumentParseFailedEnum(typeof({typeName}), \"{argumentName}\", commandArgs[i]); }}{elseExpr}";
                     }
 
                     // ParamsArray
@@ -318,8 +339,14 @@ public record class CommandParameter
             }
         }
 
-        if (!castValue) return DefaultValue.ToString();
-        return $"({Type.ToFullyQualifiedFormatDisplayString()}){DefaultValue}";
+        // for floating-point number, need to use InvaliantCulture(some culture uses ',' as separator)
+        var formattedValue = string.Format(CultureInfo.InvariantCulture, "{0}", DefaultValue);
+        if (!castValue)
+        {
+            return formattedValue;
+        }
+
+        return $"({Type.ToFullyQualifiedFormatDisplayString()}){formattedValue}";
     }
 
     public string ToTypeDisplayString()
@@ -459,5 +486,45 @@ public record class FilterInfo
         });
 
         return $"new {TypeFullName}({string.Join(", ", p)})";
+    }
+}
+
+public record class GlobalOptionInfo
+{
+    public required EquatableTypeSymbol Type { get; init; }
+    public required bool IsRequired { get; init; }
+    public required string Name { get; init; }
+    public required string Description { get; init; }
+    public required object? DefaultValue { get; init; }
+
+    public CommandParameter ToDummyCommandParameter()
+    {
+        // see: CommandHelpBuilder.CreateCommandHelpDefinition / BuildOptionsMessage
+        return new CommandParameter
+        {
+            // no need
+            Location = default,
+            WellKnownTypes = default,
+            IsNullableReference = false, // not supported
+            IsParams = false,
+            IsHidden = false,
+            OriginalParameterName = "",
+            CustomParserType = null,
+            IsFromServices = false,
+            IsFromKeyedServices = false,
+            KeyedServiceKey = null,
+            IsConsoleAppContext = false,
+            IsCancellationToken = false,
+            HasValidation = false,
+            ArgumentIndex = -1,
+            IsDefaultValueHidden = false,
+
+            Type = Type,
+            HasDefaultValue = !IsRequired, // if not required, needs defaultValue
+            DefaultValue = DefaultValue,
+            Description = Description,
+            Name = null!, // allows null in CreateCommandHelpDefinition
+            Aliases = Name.Split(['|'], StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).ToArray()
+        };
     }
 }

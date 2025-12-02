@@ -1,6 +1,10 @@
 ﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using System.Collections.Immutable;
+using System.Runtime.InteropServices.ComTypes;
+using System.Security.Cryptography;
+using System.Xml.Linq;
 
 namespace ConsoleAppFramework;
 
@@ -172,6 +176,167 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
             .ToArray();
     }
 
+    public GlobalOptionInfo[] ParseGlobalOptions()
+    {
+        var lambdaExpr = (node as InvocationExpressionSyntax);
+        if (lambdaExpr == null) return [];
+
+        var addOptions = node
+            .DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Select(x =>
+            {
+                var expr = x.Expression as MemberAccessExpressionSyntax;
+                var methodName = expr?.Name.Identifier.Text;
+                if (methodName is "AddGlobalOption")
+                {
+                    return new { node = x, expr, required = false };
+                }
+                else if (methodName is "AddRequiredGlobalOption")
+                {
+                    return new { node = x, expr, required = true };
+                }
+
+                return null;
+            })
+            .Where(x => x != null);
+
+        var result = addOptions
+            .Select(x =>
+            {
+                var node = x!.node;
+                var memberAccess = x.expr!;
+                var symbolInfo = model.GetSymbolInfo(memberAccess).Symbol as IMethodSymbol;
+
+                var typeSymbol = symbolInfo!.TypeArguments[0];
+
+                if (!IsParsableType(typeSymbol))
+                {
+                    context.ReportDiagnostic(DiagnosticDescriptors.InvalidGlobalOptionsType, node.GetLocation());
+                    return null!;
+                }
+
+                object? name = "";
+                object? description = "";
+                object? defaultValue = GetDefaultValue(typeSymbol);
+
+                var arguments = node.ArgumentList;
+
+                if (!x.required)
+                {
+                    // public T AddGlobalOption<T>([ConstantExpected] string name, [ConstantExpected] string description = "", [ConstantExpected] T defaultValue = default(T))
+                    node.ArgumentList.GetConstantValues(model, "name", "description", "defaultValue", ref name, ref description, ref defaultValue);
+                }
+                else
+                {
+                    // public T AddRequiredGlobalOption<T>([ConstantExpected] string name, [ConstantExpected] string description = "")
+                    node.ArgumentList.GetConstantValues(model, "name", "description", ref name, ref description);
+                }
+
+                return new GlobalOptionInfo
+                {
+                    Type = new(typeSymbol),
+                    IsRequired = x.required,
+                    Name = (string)name!,
+                    Description = (string)description!,
+                    DefaultValue = defaultValue
+                };
+            })
+            .Where(x => x != null)
+            .ToArray();
+
+        return result;
+
+        // GlobalOptions allow type is limited(C# compile-time constant only)
+        // bool, char, sbyte, byte, short, ushort, int, uint, long, ulong, float, double, decimal
+        // string
+        // null
+        // enum
+        // Nullable<T>
+        bool IsParsableType(ITypeSymbol type)
+        {
+            if (type is INamedTypeSymbol { IsValueType: true, OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } namedType)
+            {
+                var underlyingType = namedType.TypeArguments[0];
+                return IsParsableType(underlyingType);
+            }
+
+            switch (type.SpecialType)
+            {
+                case SpecialType.System_Boolean:
+                case SpecialType.System_Char:
+                case SpecialType.System_SByte:
+                case SpecialType.System_Byte:
+                case SpecialType.System_Int16:
+                case SpecialType.System_UInt16:
+                case SpecialType.System_Int32:
+                case SpecialType.System_UInt32:
+                case SpecialType.System_Int64:
+                case SpecialType.System_UInt64:
+                case SpecialType.System_Single:
+                case SpecialType.System_Double:
+                case SpecialType.System_Decimal:
+                case SpecialType.System_String:
+                    return true;
+            }
+
+            if (type.TypeKind == TypeKind.Enum)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        object? GetDefaultValue(ITypeSymbol type)
+        {
+            if (type is INamedTypeSymbol { IsValueType: true, OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } namedType)
+            {
+                return null;
+            }
+
+            switch (type.SpecialType)
+            {
+                case SpecialType.System_Boolean: return false;
+                case SpecialType.System_Char: return '\0';
+                case SpecialType.System_SByte: return (sbyte)0;
+                case SpecialType.System_Byte: return (byte)0;
+                case SpecialType.System_Int16: return (short)0;
+                case SpecialType.System_UInt16: return (ushort)0;
+                case SpecialType.System_Int32: return 0;
+                case SpecialType.System_UInt32: return 0u;
+                case SpecialType.System_Int64: return 0L;
+                case SpecialType.System_UInt64: return 0UL;
+                case SpecialType.System_Single: return 0f;
+                case SpecialType.System_Double: return 0d;
+                case SpecialType.System_Decimal: return 0m;
+                case SpecialType.System_String: return null;
+                default:
+                    break;
+            }
+
+            if (type.TypeKind == TypeKind.Enum)
+            {
+                var enumType = (INamedTypeSymbol)type;
+                var underlyingType = enumType.EnumUnderlyingType;
+                return underlyingType?.SpecialType switch
+                {
+                    SpecialType.System_Byte => (byte)0,
+                    SpecialType.System_SByte => (sbyte)0,
+                    SpecialType.System_Int16 => (short)0,
+                    SpecialType.System_UInt16 => (ushort)0,
+                    SpecialType.System_Int32 => 0,
+                    SpecialType.System_UInt32 => 0u,
+                    SpecialType.System_Int64 => 0L,
+                    SpecialType.System_UInt64 => 0UL,
+                    _ => 0
+                };
+            }
+
+            return null;
+        }
+    }
+
     Command? ExpressionToCommand(ExpressionSyntax expression, string commandName)
     {
         var lambda = expression as ParenthesizedLambdaExpressionSyntax;
@@ -192,7 +357,12 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
                 var methodSymbols = model.GetMemberGroup(expression);
                 if (methodSymbols.Length > 0 && methodSymbols[0] is IMethodSymbol methodSymbol)
                 {
-                    return ParseFromMethodSymbol(methodSymbol, addressOf: false, commandName, []);
+                    var cmd = ParseFromMethodSymbol(methodSymbol, addressOf: false, commandName, []);
+                    if (cmd != null)
+                    {
+                        cmd.IsRequireDynamicDependencyAttribute = true;
+                    }
+                    return cmd;
                 }
             }
         }
@@ -254,6 +424,7 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
         }
 
         var parsableIndex = 0;
+        var argumentIndexCounter = 0;
         var parameters = lambda.ParameterList.Parameters
             .Where(x => x.Type != null)
             .Select(x =>
@@ -288,6 +459,10 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
                 var isHidden = x.AttributeLists
                                 .SelectMany(x => x.Attributes)
                                 .Any(x => model.GetTypeInfo(x).Type?.Name == "HiddenAttribute");
+
+                var isDefaultValueHidden = x.AttributeLists
+                                .SelectMany(x => x.Attributes)
+                                .Any(x => model.GetTypeInfo(x).Type?.Name == "HideDefaultValueAttribute");
 
                 var customParserType = x.AttributeLists.SelectMany(x => x.Attributes)
                     .Select(x =>
@@ -380,7 +555,7 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
                 {
                     if (hasArgument)
                     {
-                        argumentIndex = parsableIndex++;
+                        argumentIndex = argumentIndexCounter++;
                     }
                     else
                     {
@@ -399,6 +574,7 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
                     IsConsoleAppContext = isConsoleAppContext,
                     IsParams = hasParams,
                     IsHidden = isHidden,
+                    IsDefaultValueHidden = isDefaultValueHidden,
                     Type = new EquatableTypeSymbol(type.Type!),
                     Location = x.GetLocation(),
                     HasDefaultValue = hasDefault,
@@ -427,7 +603,8 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
             MethodKind = MethodKind.Lambda,
             Description = "",
             DelegateBuildType = delegateBuildType,
-            Filters = globalFilters
+            Filters = globalFilters,
+            IsRequireDynamicDependencyAttribute = false,
         };
 
         return cmd;
@@ -551,6 +728,7 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
         }
 
         var parsableIndex = 0;
+        var argumentIndexCounter = 0;
         var parameters = methodSymbol.Parameters
             .Select(x =>
             {
@@ -562,6 +740,7 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
                 var isCancellationToken = SymbolEqualityComparer.Default.Equals(x.Type, wellKnownTypes.CancellationToken);
                 var isConsoleAppContext = x.Type!.Name == "ConsoleAppContext";
                 var isHiddenParameter = x.GetAttributes().Any(x => x.AttributeClass?.Name == "HiddenAttribute");
+                var isDefaultValueHidden = x.GetAttributes().Any(x => x.AttributeClass?.Name == "HideDefaultValueAttribute");
 
                 object? keyedServiceKey = null;
                 if (hasFromKeyedServices)
@@ -582,7 +761,7 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
                 {
                     if (hasArgument)
                     {
-                        argumentIndex = parsableIndex++;
+                        argumentIndex = argumentIndexCounter++;
                     }
                     else
                     {
@@ -601,6 +780,7 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
                     IsConsoleAppContext = isConsoleAppContext,
                     IsParams = x.IsParams,
                     IsHidden = isHiddenParameter,
+                    IsDefaultValueHidden = isDefaultValueHidden,
                     Location = x.DeclaringSyntaxReferences[0].GetSyntax().GetLocation(),
                     Type = new EquatableTypeSymbol(x.Type),
                     HasDefaultValue = x.HasExplicitDefaultValue,
@@ -639,23 +819,23 @@ internal class Parser(ConsoleAppFrameworkGeneratorOptions generatorOptions, Diag
     {
         var hasDiagnostic = false;
 
-        // Sequential Argument
-        var existsNotArgument = false;
-        foreach (var parameter in command.Parameters)
-        {
-            if (!parameter.IsParsable) continue;
+        // Sequential Argument(v5.7.7 support it).
+        //var existsNotArgument = false;
+        //foreach (var parameter in command.Parameters)
+        //{
+        //    if (!parameter.IsParsable) continue;
 
-            if (!parameter.IsArgument)
-            {
-                existsNotArgument = true;
-            }
+        //    if (!parameter.IsArgument)
+        //    {
+        //        existsNotArgument = true;
+        //    }
 
-            if (parameter.IsArgument && existsNotArgument)
-            {
-                context.ReportDiagnostic(DiagnosticDescriptors.SequentialArgument, parameter.Location);
-                hasDiagnostic = true;
-            }
-        }
+        //    if (parameter.IsArgument && existsNotArgument)
+        //    {
+        //        context.ReportDiagnostic(DiagnosticDescriptors.SequentialArgument, parameter.Location);
+        //        hasDiagnostic = true;
+        //    }
+        //}
 
         // FunctionPointer can not use validation
         if (command.MethodKind == MethodKind.FunctionPointer)
